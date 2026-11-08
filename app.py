@@ -1,5 +1,5 @@
 """
-Sunrise Space — backend (Flask + SQLite)
+Sunrise Space — backend (Flask + SQLite ou PostgreSQL)
 Mise en relation clients <-> chauffeurs de moto-taxi, Côte d'Ivoire.
 
 Lancer :  python app.py      (http://localhost:5000)
@@ -9,7 +9,6 @@ import math
 import os
 import re
 import secrets
-import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -19,6 +18,14 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("SUNRISE_DB", os.path.join(BASE_DIR, "sunrise.db"))
+# Si DATABASE_URL est défini (PostgreSQL, ex. Neon), les données y sont gardées durablement.
+# Sinon, on utilise le fichier SQLite ci-dessus (pratique en local).
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+USE_PG = DATABASE_URL.startswith(("postgres://", "postgresql://"))
+if USE_PG:
+    import psycopg
+else:
+    import sqlite3
 
 # --- Réglages -----------------------------------------------------------------
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
@@ -106,11 +113,61 @@ CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status);
 
 
 # --- Base de données ----------------------------------------------------------
+class Row(dict):
+    """Ligne de résultat : accessible par nom (row["id"]) ou par position (row[0])."""
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+
+def _row_factory(cursor):
+    names = [c.name for c in (cursor.description or [])]
+    return lambda values: Row(zip(names, values))
+
+
+def _pg(sql):
+    """Adapte une requête écrite pour SQLite à PostgreSQL."""
+    return sql.replace("?", "%s").replace(" LIKE ", " ILIKE ")
+
+
+class DB:
+    """Petite couche commune SQLite / PostgreSQL."""
+
+    def __init__(self):
+        if USE_PG:
+            self.conn = psycopg.connect(DATABASE_URL, row_factory=_row_factory, connect_timeout=20, prepare_threshold=None)
+        else:
+            self.conn = sqlite3.connect(DB_PATH, timeout=10)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA foreign_keys=ON")
+
+    def execute(self, sql, params=()):
+        if USE_PG:
+            cur = self.conn.cursor()
+            cur.execute(_pg(sql), tuple(params))
+            return cur
+        return self.conn.execute(sql, tuple(params))
+
+    def insert(self, sql, params=()):
+        """Exécute un INSERT dans une table à colonne id et renvoie l'id créé."""
+        if USE_PG:
+            return self.execute(sql + " RETURNING id", params).fetchone()["id"]
+        return self.conn.execute(sql, tuple(params)).lastrowid
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
+
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH, timeout=10)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys=ON")
+        g.db = DB()
     return g.db
 
 
@@ -121,13 +178,26 @@ def close_db(_exc):
         db.close()
 
 
+def schema_sql():
+    sql = SCHEMA
+    if USE_PG:
+        sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace(" REAL", " DOUBLE PRECISION")
+    return [part.strip() for part in sql.split(";") if part.strip()]
+
+
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    db.execute("PRAGMA journal_mode=WAL")
-    db.executescript(SCHEMA)
-    db.commit()
-    ensure_admin(db)
-    db.close()
+    db = DB()
+    try:
+        if USE_PG:
+            db.execute("SELECT pg_advisory_xact_lock(7461)")  # évite les conflits si plusieurs processus démarrent
+        else:
+            db.conn.execute("PRAGMA journal_mode=WAL")
+        for statement in schema_sql():
+            db.execute(statement)
+        db.commit()
+        ensure_admin(db)
+    finally:
+        db.close()
 
 
 def ensure_admin(db):
@@ -408,11 +478,10 @@ def register():
     db = get_db()
     if db.execute("SELECT 1 FROM users WHERE phone=?", (phone,)).fetchone():
         return err("Ce numéro a déjà un compte. Connectez-vous.", 409)
-    cur = db.execute(
+    uid = db.insert(
         "INSERT INTO users(role,name,phone,password_hash,created_at) VALUES(?,?,?,?,?)",
         (role, name, phone, generate_password_hash(password), ts()),
     )
-    uid = cur.lastrowid
     if role == "driver":
         db.execute(
             "INSERT INTO drivers(user_id,plate,moto_model,permis,commune,whatsapp) VALUES(?,?,?,?,?,?)",
@@ -615,14 +684,14 @@ def create_request():
     ).fetchone()
     if active:
         return err("Vous avez déjà une demande en cours.", 409)
-    cur = db.execute(
+    new_id = db.insert(
         """INSERT INTO ride_requests(client_id,lat,lng,pickup_text,destination_text,note,created_at)
            VALUES(?,?,?,?,?,?,?)""",
         (g.user["id"], coords[0], coords[1], clean(data.get("pickup_text"), 120),
          clean(data.get("destination_text"), 120), clean(data.get("note"), 200), ts()),
     )
     db.commit()
-    r = db.execute("SELECT * FROM ride_requests WHERE id=?", (cur.lastrowid,)).fetchone()
+    r = db.execute("SELECT * FROM ride_requests WHERE id=?", (new_id,)).fetchone()
     return jsonify({"request": serialize_request_for_client(db, r)}), 201
 
 
