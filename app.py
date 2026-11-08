@@ -132,7 +132,21 @@ def init_db():
 
 def ensure_admin(db):
     """Crée le compte administrateur au premier lancement."""
-    if db.execute("SELECT 1 FROM users WHERE role='admin' LIMIT 1").fetchone():
+    existing = db.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
+    if existing:
+        # Réinitialisation volontaire : RESET_ADMIN_PASSWORD=oui + ADMIN_PASSWORD (+ ADMIN_PHONE)
+        wanted = os.environ.get("ADMIN_PASSWORD")
+        if os.environ.get("RESET_ADMIN_PASSWORD", "").lower() in ("oui", "yes", "1", "true") and wanted:
+            new_phone = normalize_phone(os.environ.get("ADMIN_PHONE", "")) 
+            db.execute("UPDATE users SET password_hash=?, is_blocked=0 WHERE id=?",
+                       (generate_password_hash(wanted), existing[0]))
+            if new_phone:
+                taken = db.execute("SELECT 1 FROM users WHERE phone=? AND id!=?", (new_phone, existing[0])).fetchone()
+                if not taken:
+                    db.execute("UPDATE users SET phone=? WHERE id=?", (new_phone, existing[0]))
+            db.execute("DELETE FROM tokens WHERE user_id=?", (existing[0],))
+            db.commit()
+            print("Mot de passe admin réinitialisé. Retirez maintenant RESET_ADMIN_PASSWORD.")
         return
     phone = normalize_phone(os.environ.get("ADMIN_PHONE", "0700000000")) or "0700000000"
     password = os.environ.get("ADMIN_PASSWORD")
