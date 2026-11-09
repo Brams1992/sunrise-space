@@ -75,7 +75,7 @@ function sessionLost() {
 function clearTimers() {
   state.timers.forEach(clearInterval);
   state.timers = [];
-  if (state.map) { state.map.remove(); state.map = null; state.layers = null; state.meMarker = null; }
+  destroyMap();
 }
 const every = (ms, fn) => state.timers.push(setInterval(() => { if (!document.hidden) fn(); }, ms));
 
@@ -98,34 +98,66 @@ function askNote(title, placeholder, confirmLabel = 'Confirmer') {
 }
 
 /* ---------- Géolocalisation ---------- */
-function getPosition() {
+const GEO_HELP = "Localisation refusée. Sur iPhone : Réglages › Confidentialité et sécurité › Service de localisation › Safari (ou Chrome) › « Lors de l'utilisation » et activez « Position précise ».";
+
+/* Attend jusqu'à `timeout` ms et garde la position la plus précise reçue (s'arrête dès ±25 m). */
+function getPosition({ timeout = 15000, good = 25 } = {}) {
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error("La localisation n'est pas disponible sur cet appareil."));
-    navigator.geolocation.getCurrentPosition(
-      (p) => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-      (e) => reject(new Error(e.code === 1
-        ? "Localisation refusée. Autorisez-la dans les réglages du navigateur."
-        : "Position introuvable. Vérifiez que le GPS est activé.")),
-      { enableHighAccuracy: true, timeout: 12000, maximumAge: 15000 },
+    let best = null, done = false, id = null, timer = null;
+    const out = (p) => ({ lat: p.coords.latitude, lng: p.coords.longitude, accuracy: Math.round(p.coords.accuracy || 0) });
+    const finish = (fn, v) => {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      try { navigator.geolocation.clearWatch(id); } catch { /* rien */ }
+      fn(v);
+    };
+    id = navigator.geolocation.watchPosition(
+      (p) => {
+        if (!best || p.coords.accuracy < best.coords.accuracy) best = p;
+        if (p.coords.accuracy <= good) finish(resolve, out(best));
+      },
+      (e) => { if (e.code === 1) finish(reject, new Error(GEO_HELP)); },
+      { enableHighAccuracy: true, maximumAge: 0, timeout },
     );
+    timer = setTimeout(() => (best
+      ? finish(resolve, out(best))
+      : finish(reject, new Error("Position introuvable. Sortez à l'air libre et vérifiez que le GPS est activé."))), timeout);
   });
+}
+
+function meIcon() { return L.divIcon({ className: 'pin-me', iconSize: [20, 20] }); }
+
+function drawMe(p) {
+  if (!state.map) return;
+  const ll = [p.lat, p.lng];
+  if (state.meMarker) state.meMarker.setLatLng(ll);
+  else state.meMarker = L.marker(ll, { icon: meIcon(), keyboard: false, zIndexOffset: 1000 }).addTo(state.map);
+  if (state.accCircle) { state.map.removeLayer(state.accCircle); state.accCircle = null; }
+  if (p.source === 'gps' && p.accuracy) {
+    state.accCircle = L.circle(ll, { radius: p.accuracy, color: '#1E6CFF', weight: 1, fillOpacity: 0.12, interactive: false }).addTo(state.map);
+  }
 }
 
 function setPos(p) {
   state.pos = p;
   const line = $('#posline');
   if (line) line.innerHTML = posLineHTML();
-  if (state.map) {
-    if (state.meMarker) state.meMarker.setLatLng([p.lat, p.lng]);
-    else state.meMarker = L.marker([p.lat, p.lng], { icon: L.divIcon({ className: 'pin-me', iconSize: [20, 20] }), keyboard: false, zIndexOffset: 1000 }).addTo(state.map);
-  }
+  drawMe(p);
   if (state.onPos) state.onPos();
 }
 
 function posLineHTML() {
   if (!state.pos) return '<span class="chip warn">Position non définie</span> <span class="muted">Touchez « Me localiser » ou choisissez votre commune.</span>';
-  const src = { gps: 'GPS', map: 'choisie sur la carte', commune: 'commune choisie' }[state.pos.source];
-  return `<span class="chip ok">📍 Position ${src}</span>`;
+  const p = state.pos;
+  if (p.source === 'commune') return '<span class="chip warn">📍 Position approximative (commune)</span><p class="tiny muted">Touchez « Me localiser » pour une position précise.</p>';
+  if (p.source === 'map') return '<span class="chip ok">📍 Position choisie sur la carte</span>';
+  const a = p.accuracy;
+  if (a == null) return '<span class="chip ok">📍 Position GPS</span>';
+  const label = a <= 50 ? 'Position précise' : a <= 150 ? 'Précision moyenne' : 'Position approximative';
+  const cls = a <= 50 ? 'ok' : a <= 150 ? 'warn' : 'bad';
+  const tip = a > 100 ? '<p class="tiny muted">Placez-vous à l\'extérieur, loin des murs, puis réessayez. Vérifiez « Position précise » dans Réglages › Confidentialité › Service de localisation.</p>' : '';
+  return `<span class="chip ${cls}">📍 ${label} (±${a} m)</span>${tip}`;
 }
 
 function posControlsHTML() {
@@ -140,9 +172,16 @@ function posControlsHTML() {
 }
 
 function bindPosControls() {
-  $('#btn-loc').onclick = async () => {
-    try { setPos({ ...(await getPosition()), source: 'gps' }); toast('Position mise à jour'); }
-    catch (e) { toast(e.message, 'bad'); }
+  $('#btn-loc').onclick = async (ev) => {
+    const b = ev.currentTarget, label = b.textContent;
+    b.disabled = true; b.textContent = '📡 Recherche…';
+    try {
+      const p = await getPosition();
+      setPos({ ...p, source: 'gps' });
+      if (state.map) state.map.setView([p.lat, p.lng], p.accuracy <= 50 ? 17 : 15);
+      toast(`Position trouvée (±${p.accuracy} m)`);
+    } catch (e) { toast(e.message, 'bad'); }
+    finally { b.disabled = false; b.textContent = label; }
   };
   $('#sel-commune').onchange = (ev) => {
     const c = COMMUNE_COORDS[ev.target.value];
@@ -161,7 +200,8 @@ function setupMap(elId) {
   const map = L.map(elId, { zoomControl: true }).setView([c.lat, c.lng], state.pos ? 14 : 11);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
   state.layers = L.layerGroup().addTo(map);
-  if (state.pos) state.meMarker = L.marker([state.pos.lat, state.pos.lng], { icon: L.divIcon({ className: 'pin-me', iconSize: [20, 20] }), keyboard: false, zIndexOffset: 1000 }).addTo(map);
+  state.map = map;
+  if (state.pos) drawMe(state.pos);
   map.on('click', (e) => setPos({ lat: e.latlng.lat, lng: e.latlng.lng, source: 'map' }));
   setTimeout(() => map.invalidateSize(), 150);
   state.map = map;
@@ -465,8 +505,13 @@ async function clientRequest() {
   function paint(r) {
     const box = $('#reqbox');
     const key = r ? `${r.id}:${r.status}` : 'none';
-    if (key === lastKey) { const a = $('#age'); if (a && r) a.textContent = ago(r.age_min); return; }
+    if (key === lastKey) {
+      const a = $('#age'); if (a && r) a.textContent = ago(r.age_min);
+      if (r && r.status === 'accepted' && r.driver) updateClientMap(r, false);  // la moto avance : on met la carte à jour
+      return;
+    }
     lastKey = key;
+    destroyMap();
     if (!r) {
       box.innerHTML = formHTML();
       bindPosControls();
@@ -479,7 +524,9 @@ async function clientRequest() {
         <p class="muted">Demande envoyée <span id="age">${esc(ago(r.age_min))}</span>. Elle expire au bout de 30 minutes.</p>${where}
         <button class="btn btn-ghost btn-block" id="btn-cancel">Annuler la demande</button></section>`;
     } else if (r.status === 'accepted' && r.driver) {
-      box.innerHTML = `<section class="card stack job"><h2>✅ Un chauffeur arrive !</h2>${driverBlock(r.driver)}${where}
+      box.innerHTML = `<section class="card stack job"><h2>✅ Un chauffeur arrive !</h2>
+        <div id="cmap" class="map" aria-label="Carte : votre position et le chauffeur"></div>
+        <p id="ceta" class="muted">Recherche du chauffeur sur la carte…</p>${driverBlock(r.driver)}${where}
         <button class="btn btn-ok btn-block" id="btn-done">J'ai terminé ma course</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" id="btn-cancel">Annuler</button>
         <button class="btn btn-ghost btn-sm grow" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">⚑ Signaler</button></div></section>`;
@@ -490,6 +537,7 @@ async function clientRequest() {
         <button class="btn btn-block" id="btn-new">Nouvelle demande</button></section>`;
       const nb = $('#btn-new'); if (nb) nb.onclick = () => { lastKey = null; paint(null); };
     }
+    if (r.status === 'accepted' && r.driver) initClientMap(r);
     const c = $('#btn-cancel'); if (c) c.onclick = () => act(`/api/requests/${r.id}/cancel`, 'Demande annulée');
     const d = $('#btn-done'); if (d) d.onclick = () => act(`/api/requests/${r.id}/complete`, 'Course terminée');
   }
@@ -531,17 +579,207 @@ async function clientRequest() {
 }
 
 /* ======================= CHAUFFEUR ======================= */
-function stopLocSharing() { clearInterval(state.locTimer); state.locTimer = null; state.locOk = null; }
-async function pushLoc() {
+let wakeLock = null;
+async function keepAwake() {
   try {
-    const p = await getPosition();
-    await api('/api/driver/location', { method: 'POST', body: p });
+    if (!('wakeLock' in navigator) || wakeLock) return;
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+  } catch { wakeLock = null; }
+}
+function releaseWake() { try { if (wakeLock) wakeLock.release(); } catch { /* rien */ } wakeLock = null; }
+document.addEventListener('visibilitychange', () => { if (!document.hidden && state.locTimer) keepAwake(); });
+
+function stopLocSharing() {
+  if (state.locTimer) { try { navigator.geolocation.clearWatch(state.locTimer.id); } catch { /* rien */ } }
+  state.locTimer = null; state.locOk = null; state.locAcc = null; state.locLast = 0; state.locWeak = false; state.locDenied = false; state.lastFix = null;
+  releaseWake();
+}
+
+function refreshBadge() { const b = $('#locbadge'); if (b) b.innerHTML = locBadge(); }
+
+async function onDriverFix(p) {
+  const acc = Math.round(p.coords.accuracy || 0);
+  state.locAcc = acc; state.locDenied = false;
+  if (acc > 150) { state.locWeak = true; refreshBadge(); return; }   // trop imprécis : on ne l'envoie pas
+  state.locWeak = false;
+  state.lastFix = { lat: p.coords.latitude, lng: p.coords.longitude };
+  updateMaps();
+  const t = Date.now();
+  if (t - (state.locLast || 0) < 8000) { refreshBadge(); return; }  // un envoi toutes les ~8 s
+  state.locLast = t;
+  try {
+    await api('/api/driver/location', { method: 'POST', body: { lat: p.coords.latitude, lng: p.coords.longitude, accuracy: acc } });
     state.locOk = true;
   } catch { state.locOk = false; }
-  const b = $('#locbadge'); if (b) b.innerHTML = locBadge();
+  refreshBadge();
 }
-function startLocSharing() { stopLocSharing(); pushLoc(); state.locTimer = setInterval(() => { if (!document.hidden) pushLoc(); }, 20000); }
-const locBadge = () => (state.locOk === false ? '<span class="chip bad">⚠ Position non partagée</span>' : state.locOk ? '<span class="chip ok">📡 Position partagée</span>' : '<span class="chip">📡 Localisation…</span>');
+
+function onDriverErr(e) { state.locOk = false; state.locDenied = e.code === 1; refreshBadge(); }
+
+function startLocSharing() {
+  stopLocSharing();
+  if (!navigator.geolocation) { state.locOk = false; return; }
+  const id = navigator.geolocation.watchPosition(onDriverFix, onDriverErr, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  state.locTimer = { id };
+  keepAwake();
+}
+
+function locBadge() {
+  if (state.locDenied) return '<span class="chip bad">⚠ Localisation refusée</span>';
+  if (state.locWeak) return `<span class="chip warn">📡 Signal GPS faible (±${state.locAcc} m) : position non envoyée</span>`;
+  if (state.locOk === false) return '<span class="chip bad">⚠ Position non partagée</span>';
+  if (state.locOk) return `<span class="chip ok">📡 Position partagée${state.locAcc != null ? ` · ±${state.locAcc} m` : ''}</span>`;
+  return '<span class="chip">📡 Localisation…</span>';
+}
+
+/* ---------- Cartes du chauffeur : client + itinéraire ---------- */
+const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving';
+const jobMap = { job: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
+const reqMap = { dm: null };
+const cliMap = { req: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
+
+function destroyMap() {
+  if (state.map) { try { state.map.remove(); } catch { /* rien */ } }
+  state.map = null; state.layers = null; state.meMarker = null; state.accCircle = null;
+  Object.assign(jobMap, { job: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
+  reqMap.dm = null;
+  Object.assign(cliMap, { req: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
+}
+
+function distKm(a, b) {
+  const r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) ** 2;
+  return 12742 * Math.asin(Math.sqrt(h));
+}
+
+const pinIcon = (emoji) => L.divIcon({ className: 'pin', html: emoji, iconSize: [34, 34], iconAnchor: [17, 17] });
+const appleLink = (lat, lng) => `https://maps.apple.com/?daddr=${lat},${lng}&dirflg=d`;
+const myPos = () => state.lastFix || (state.driver && state.driver.lat != null ? { lat: state.driver.lat, lng: state.driver.lng } : null);
+
+async function fetchRoute(a, b) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const res = await fetch(`${OSRM_URL}/${a.lng},${a.lat};${b.lng},${b.lat}?overview=full&geometries=geojson`, { signal: ctl.signal });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const rt = data.routes && data.routes[0];
+    if (!rt) return null;
+    return { coords: rt.geometry.coordinates.map(([lng, lat]) => [lat, lng]), km: Math.round(rt.distance / 100) / 10, min: Math.max(1, Math.round(rt.duration / 60)) };
+  } catch { return null; } finally { clearTimeout(timer); }
+}
+
+function setEta(html) { const el = $('#jobeta'); if (el) el.innerHTML = html; }
+
+function newMap(elId) {
+  const map = L.map(elId, { zoomControl: true });
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  state.map = map;
+  state.layers = L.layerGroup().addTo(map);
+  setTimeout(() => map.invalidateSize(), 150);
+  return map;
+}
+
+function initJobMap(job) {
+  const el = $('#jobmap');
+  if (!el) return;
+  jobMap.job = job;
+  if (!window.L) {
+    el.innerHTML = '<div class="map-fallback">Carte indisponible. Utilisez les boutons Plans ou Google Maps.</div>';
+    const me = myPos();
+    setEta(me ? `À vol d'oiseau : <b>${fmtDist(distKm(me, job))}</b>` : '');
+    return;
+  }
+  const map = newMap('jobmap').setView([job.lat, job.lng], 15);
+  L.marker([job.lat, job.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup(`Client : ${esc(job.client_name)}`).addTo(map);
+  refreshJobRoute(true);
+}
+
+async function refreshJobRoute(force) {
+  const job = jobMap.job, map = state.map;
+  if (!job || !map || !window.L) return;
+  const me = myPos();
+  if (!me) { setEta('En attente de votre position GPS…'); return; }
+  if (jobMap.dm) jobMap.dm.setLatLng([me.lat, me.lng]);
+  else jobMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  const moved = jobMap.lastFrom ? distKm(jobMap.lastFrom, me) * 1000 : Infinity;
+  if (!force && moved < 80 && Date.now() - jobMap.lastAt < 45000) return;
+  if (jobMap.busy) return;
+  jobMap.busy = true; jobMap.lastFrom = me; jobMap.lastAt = Date.now();
+  const route = await fetchRoute(me, job);
+  jobMap.busy = false;
+  if (state.map !== map) return;  // la carte a été remplacée entre-temps
+  if (jobMap.line) map.removeLayer(jobMap.line);
+  const pts = route ? route.coords : [[me.lat, me.lng], [job.lat, job.lng]];
+  jobMap.line = L.polyline(pts, { color: '#FF7A1A', weight: 5, opacity: 0.9, dashArray: route ? null : '8 8' }).addTo(map);
+  if (!jobMap.fitted) { jobMap.fitted = true; map.fitBounds(L.latLngBounds(pts).pad(0.2), { maxZoom: 17 }); }
+  setEta(route
+    ? `🛵 Environ <b>${route.min} min</b> · ${route.km.toFixed(1).replace('.', ',')} km par la route`
+    : `À vol d'oiseau : <b>${fmtDist(distKm(me, job))}</b> <span class="tiny">(itinéraire routier indisponible, utilisez Plans ou Google Maps)</span>`);
+}
+
+function initReqMap(requests) {
+  const el = $('#reqmap');
+  if (!el) return;
+  if (!window.L) { el.innerHTML = '<div class="map-fallback">Carte indisponible. Utilisez la liste ci-dessous.</div>'; return; }
+  const map = newMap('reqmap');
+  const pts = [];
+  requests.forEach((r) => {
+    L.marker([r.lat, r.lng], { icon: pinIcon('🙋') }).bindPopup(`<b>${esc(r.client_name)}</b><br>${fmtDist(r.distance_km)}`).addTo(state.layers);
+    pts.push([r.lat, r.lng]);
+  });
+  const me = myPos();
+  if (me) { reqMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map); pts.push([me.lat, me.lng]); }
+  map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 16 });
+}
+
+function setCEta(html) { const el = $('#ceta'); if (el) el.innerHTML = html; }
+
+/* Côté client : voir la moto arriver (position du chauffeur, trajet et temps estimé). */
+function initClientMap(r) {
+  const el = $('#cmap');
+  if (!el) return;
+  if (!window.L) {
+    el.innerHTML = '<div class="map-fallback">Carte indisponible. Appelez le chauffeur pour vous coordonner.</div>';
+    updateClientMap(r, true);
+    return;
+  }
+  const map = newMap('cmap').setView([r.lat, r.lng], 15);
+  L.marker([r.lat, r.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup('Vous êtes ici').addTo(map);
+  updateClientMap(r, true);
+}
+
+async function updateClientMap(r, force) {
+  cliMap.req = r;
+  const d = r.driver;
+  if (!d || d.lat == null) { setCEta('En attente de la position du chauffeur…'); return; }
+  const me = { lat: d.lat, lng: d.lng }, dest = { lat: r.lat, lng: r.lng };
+  const map = state.map;
+  if (!window.L || !map) { setCEta(`Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`); return; }
+  if (cliMap.dm) cliMap.dm.setLatLng([me.lat, me.lng]);
+  else cliMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  const moved = cliMap.lastFrom ? distKm(cliMap.lastFrom, me) * 1000 : Infinity;
+  if (!force && moved < 80 && Date.now() - cliMap.lastAt < 45000) return;
+  if (cliMap.busy) return;
+  cliMap.busy = true; cliMap.lastFrom = me; cliMap.lastAt = Date.now();
+  const route = await fetchRoute(me, dest);
+  cliMap.busy = false;
+  if (state.map !== map) return;
+  if (cliMap.line) map.removeLayer(cliMap.line);
+  const pts = route ? route.coords : [[me.lat, me.lng], [dest.lat, dest.lng]];
+  cliMap.line = L.polyline(pts, { color: '#FF7A1A', weight: 5, opacity: 0.9, dashArray: route ? null : '8 8' }).addTo(map);
+  if (!cliMap.fitted) { cliMap.fitted = true; map.fitBounds(L.latLngBounds(pts).pad(0.2), { maxZoom: 17 }); }
+  setCEta(route
+    ? `🏍️ Arrivée dans environ <b>${route.min} min</b> · à ${route.km.toFixed(1).replace('.', ',')} km`
+    : `Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`);
+}
+
+function updateMaps() {
+  const me = myPos();
+  if (reqMap.dm && me) reqMap.dm.setLatLng([me.lat, me.lng]);
+  if (jobMap.job) refreshJobRoute(false);
+}
 
 async function driverHome() {
   $('#main').innerHTML = '<div id="dhome" class="stack"><div class="empty"><p>Chargement…</p></div></div>';
@@ -553,8 +791,15 @@ async function driverHome() {
     const a = last.driver.availability;
     if ((a === 'available' || a === 'busy') && !state.locTimer) startLocSharing();
     if (a === 'unavailable' && state.locTimer) stopLocSharing();
-    const s = JSON.stringify([a, last.driver.approval, last.job && last.job.id, last.requests.map((r) => [r.id, r.age_min, Math.round(r.distance_km * 10)])]);
+    const s = JSON.stringify([a, last.driver.approval, last.job && last.job.id, last.requests.map((r) => r.id)]);
     if (force || s !== sig) { sig = s; paint(last); }
+    else {  // même contenu : on met à jour distance et ancienneté sans redessiner (la carte reste en place)
+      last.requests.forEach((r) => {
+        const c = $('#rq-d-' + r.id); if (c) c.textContent = fmtDist(r.distance_km);
+        const t = $('#rq-a-' + r.id); if (t) t.textContent = 'Demandé ' + ago(r.age_min);
+      });
+    }
+    updateMaps();
   }
 
   function paint({ driver: d, job, requests }) {
@@ -574,7 +819,10 @@ async function driverHome() {
         ${job.note ? `<dt>Précision</dt><dd>${esc(job.note)}</dd>` : ''}${job.distance_km != null ? `<dt>Distance</dt><dd>${fmtDist(job.distance_km)}</dd>` : ''}</dl>
         <div class="row"><a class="btn btn-sm grow" href="tel:+225${esc(job.client_phone)}">📞 Appeler</a>
           <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(job.client_phone, 'Bonjour, je suis votre chauffeur Sunrise Space, j\'arrive.')}">WhatsApp</a></div>
-        <a class="btn btn-dark btn-block" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Itinéraire vers le client</a>
+        <div id="jobmap" class="map" aria-label="Carte : votre position et le client"></div>
+        <p id="jobeta" class="muted">Calcul de l'itinéraire…</p>
+        <div class="row"><a class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">🧭 Plans (Apple)</a>
+          <a class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Google Maps</a></div>
         <button class="btn btn-ok btn-block" data-act="complete" data-id="${job.id}">Course terminée</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${job.id}">Abandonner</button>
         <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">⚑ Signaler le client</button></div></section>`;
@@ -582,13 +830,16 @@ async function driverHome() {
       html += '<div class="section-head"><h2>Demandes près de vous</h2></div>';
       if (d.availability !== 'available') html += empty('😴', 'Vous êtes indisponible', 'Passez « Disponible » pour recevoir les demandes des clients proches.');
       else if (!requests.length) html += empty('🌅', 'Aucune demande pour le moment', 'Restez disponible : les nouvelles demandes apparaissent ici automatiquement.');
-      else html += '<div class="list">' + requests.map((r) => `<article class="card item">
-          <h3>${esc(r.client_name)} <span class="chip sun">${fmtDist(r.distance_km)}</span></h3>
+      else html += '<div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
+          <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span></h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
-          <p class="tiny muted">Demandé ${esc(ago(r.age_min))}</p>
+          <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
           <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter la course</button></div></article>`).join('') + '</div>';
     }
+    destroyMap();
     $('#dhome').innerHTML = html;
+    if (job) initJobMap(job);
+    else if (d.approval === 'approved' && d.availability === 'available' && requests.length) initReqMap(requests);
   }
 
   $('#dhome').addEventListener('click', async (e) => {
@@ -599,6 +850,7 @@ async function driverHome() {
         const want = state.driver.availability === 'available' ? 'unavailable' : 'available';
         if (want === 'available') {
           const p = await getPosition();
+          if (p.accuracy > 200) throw new Error(`Signal GPS trop faible (±${p.accuracy} m). Placez-vous à l'extérieur et réessayez.`);
           await api('/api/driver/location', { method: 'POST', body: p });
         }
         const r = await api('/api/driver/status', { method: 'PUT', body: { availability: want } });
