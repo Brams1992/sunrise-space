@@ -75,6 +75,7 @@ function sessionLost() {
 function clearTimers() {
   state.timers.forEach(clearInterval);
   state.timers = [];
+  stopClientTracking();
   destroyMap();
 }
 const every = (ms, fn) => state.timers.push(setInterval(() => { if (!document.hidden) fn(); }, ms));
@@ -140,7 +141,7 @@ function drawMe(p) {
 }
 
 function setPos(p) {
-  state.pos = p;
+  state.pos = { at: Date.now(), ...p };
   const line = $('#posline');
   if (line) line.innerHTML = posLineHTML();
   drawMe(p);
@@ -479,18 +480,30 @@ async function clientRequest() {
   $('#main').innerHTML = '<div id="reqbox"></div><div id="hist" class="stack"></div>';
   let lastKey = null;
 
+  function freshGps() { return state.pos && state.pos.source === 'gps' && Date.now() - (state.pos.at || 0) < 60000; }
+
   function formHTML() {
     return `<section class="card stack">
       <h2>Demander une moto</h2>
-      <p class="muted">Les chauffeurs disponibles près de vous verront votre demande et pourront l'accepter.</p>
-      ${posControlsHTML()}
+      <p class="muted">Votre position est détectée automatiquement. Indiquez seulement où vous allez.</p>
+      <div class="posline" id="posline">${freshGps() ? posLineHTML() : '<span class="chip">📡 Détection de votre position…</span>'}</div>
+      <button type="button" class="link" id="btn-redetect" style="justify-self:start">↻ Actualiser ma position</button>
       <form id="reqform" class="form" style="margin-top:0">
-        <label>Lieu de prise en charge <span class="hint">(repère)</span><input name="pickup" maxlength="120" placeholder="Ex. Devant la pharmacie, carrefour…"></label>
-        <label>Destination<input name="dest" maxlength="120" placeholder="Ex. Marché de Cocody"></label>
-        <label>Précision <span class="hint">(facultatif)</span><textarea name="note" maxlength="200" style="min-height:60px"></textarea></label>
+        <label>Où allez-vous ?<input name="dest" required maxlength="120" autocomplete="off" placeholder="Ex. Marché de Cocody"></label>
         <p class="banner bad" id="req-err" role="alert" hidden></p>
         <button class="btn btn-block" type="submit">🛵 Demander une moto</button>
       </form></section>`;
+  }
+
+  async function detectPosition() {
+    const line = $('#posline');
+    if (!line) return;
+    line.innerHTML = '<span class="chip">📡 Détection de votre position…</span>';
+    try { setPos({ ...(await getPosition()), source: 'gps' }); }
+    catch (e) {
+      const l = $('#posline');
+      if (l) l.innerHTML = `<span class="chip bad">⚠ Position introuvable</span><p class="tiny muted">${esc(e.message)}</p>`;
+    }
   }
 
   function driverBlock(d) {
@@ -514,11 +527,12 @@ async function clientRequest() {
     destroyMap();
     if (!r) {
       box.innerHTML = formHTML();
-      bindPosControls();
       $('#reqform').onsubmit = submit;
+      $('#btn-redetect').onclick = detectPosition;
+      if (!freshGps()) detectPosition();
       return;
     }
-    const where = `<dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Ma position')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>`;
+    const where = `<dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Ma position (GPS)')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>`;
     if (r.status === 'open') {
       box.innerHTML = `<section class="card stack"><h2><span class="pulse"></span>Recherche d'un chauffeur…</h2>
         <p class="muted">Demande envoyée <span id="age">${esc(ago(r.age_min))}</span>. Elle expire au bout de 30 minutes.</p>${where}
@@ -549,17 +563,30 @@ async function clientRequest() {
 
   async function submit(ev) {
     ev.preventDefault();
-    const f = ev.target, err = $('#req-err');
+    const f = ev.target, err = $('#req-err'), btn = f.querySelector('button[type=submit]');
     err.hidden = true;
+    const dest = f.dest.value.trim();
+    if (dest.length < 2) { err.textContent = 'Indiquez votre destination.'; err.hidden = false; return; }
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = '📡 Détection de votre position…';
     try {
-      if (!state.pos) { try { setPos({ ...(await getPosition()), source: 'gps' }); } catch { throw new Error('Indiquez votre position (Me localiser ou votre commune).'); } }
-      await api('/api/requests', { method: 'POST', body: { lat: state.pos.lat, lng: state.pos.lng, pickup_text: f.pickup.value, destination_text: f.dest.value, note: f.note.value } });
+      let p = freshGps() ? state.pos : null;
+      if (!p) { p = { ...(await getPosition()), source: 'gps' }; setPos(p); }
+      if (p.accuracy > 150 && !confirm(`Votre position est approximative (±${p.accuracy} m). Le chauffeur risque de ne pas vous trouver. Envoyer quand même ?`)) {
+        throw new Error("Demande non envoyée. Sortez à l'air libre, touchez « Actualiser ma position », puis réessayez.");
+      }
+      await api('/api/requests', { method: 'POST', body: { lat: p.lat, lng: p.lng, accuracy: p.accuracy, pickup_text: '', destination_text: dest, note: '' } });
       toast('Demande envoyée !'); lastKey = null; load();
     } catch (e) { err.textContent = e.message; err.hidden = false; }
+    finally { btn.disabled = false; btn.textContent = label; }
   }
 
   async function load() {
-    try { paint((await api('/api/requests/current')).request); } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+    try {
+      const r = (await api('/api/requests/current')).request;
+      paint(r);
+      if (r && (r.status === 'open' || r.status === 'accepted')) startClientTracking(r.id); else stopClientTracking();
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
 
   const STATUS = { open: ['En recherche', 'sun'], accepted: ['En cours', 'ok'], completed: ['Terminée', 'ok'], cancelled: ['Annulée', ''], expired: ['Expirée', ''] };
@@ -635,16 +662,16 @@ function locBadge() {
 
 /* ---------- Cartes du chauffeur : client + itinéraire ---------- */
 const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving';
-const jobMap = { job: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
+const jobMap = { job: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
 const reqMap = { dm: null };
-const cliMap = { req: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
+const cliMap = { req: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
 
 function destroyMap() {
   if (state.map) { try { state.map.remove(); } catch { /* rien */ } }
   state.map = null; state.layers = null; state.meMarker = null; state.accCircle = null;
-  Object.assign(jobMap, { job: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
+  Object.assign(jobMap, { job: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
   reqMap.dm = null;
-  Object.assign(cliMap, { req: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
+  Object.assign(cliMap, { req: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
 }
 
 function distKm(a, b) {
@@ -692,7 +719,7 @@ function initJobMap(job) {
     return;
   }
   const map = newMap('jobmap').setView([job.lat, job.lng], 15);
-  L.marker([job.lat, job.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup(`Client : ${esc(job.client_name)}`).addTo(map);
+  jobMap.cm = L.marker([job.lat, job.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup(`Client : ${esc(job.client_name)}`).addTo(map);
   refreshJobRoute(true);
 }
 
@@ -734,6 +761,29 @@ function initReqMap(requests) {
   map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 16 });
 }
 
+function stopClientTracking() {
+  if (state.cliWatch) { try { navigator.geolocation.clearWatch(state.cliWatch.id); } catch { /* rien */ } }
+  state.cliWatch = null;
+}
+
+/* Tant que la demande est ouverte ou acceptée, la position du client est envoyée automatiquement. */
+function startClientTracking(rid) {
+  if (state.cliWatch && state.cliWatch.rid === rid) return;
+  stopClientTracking();
+  if (!navigator.geolocation) return;
+  const w = { rid, last: null, at: 0, id: null };
+  w.id = navigator.geolocation.watchPosition(async (p) => {
+    if (p.coords.accuracy > 150) return;
+    const cur = { lat: p.coords.latitude, lng: p.coords.longitude };
+    const now = Date.now();
+    if (now - w.at < 8000) return;
+    if (w.last && distKm(w.last, cur) * 1000 < 25) return;
+    w.at = now; w.last = cur;
+    try { await api(`/api/requests/${rid}/location`, { method: 'POST', body: cur }); } catch { /* on réessaiera au prochain point */ }
+  }, () => { /* refus : la position initiale reste valable */ }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  state.cliWatch = w;
+}
+
 function setCEta(html) { const el = $('#ceta'); if (el) el.innerHTML = html; }
 
 /* Côté client : voir la moto arriver (position du chauffeur, trajet et temps estimé). */
@@ -746,7 +796,7 @@ function initClientMap(r) {
     return;
   }
   const map = newMap('cmap').setView([r.lat, r.lng], 15);
-  L.marker([r.lat, r.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup('Vous êtes ici').addTo(map);
+  cliMap.cm = L.marker([r.lat, r.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup('Vous êtes ici').addTo(map);
   updateClientMap(r, true);
 }
 
@@ -756,6 +806,7 @@ async function updateClientMap(r, force) {
   if (!d || d.lat == null) { setCEta('En attente de la position du chauffeur…'); return; }
   const me = { lat: d.lat, lng: d.lng }, dest = { lat: r.lat, lng: r.lng };
   const map = state.map;
+  if (cliMap.cm) cliMap.cm.setLatLng([dest.lat, dest.lng]);  // le client a pu bouger
   if (!window.L || !map) { setCEta(`Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`); return; }
   if (cliMap.dm) cliMap.dm.setLatLng([me.lat, me.lng]);
   else cliMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
@@ -799,6 +850,13 @@ async function driverHome() {
         const t = $('#rq-a-' + r.id); if (t) t.textContent = 'Demandé ' + ago(r.age_min);
       });
     }
+    if (last.job && jobMap.job && jobMap.job.id === last.job.id) {  // le client a pu bouger
+      jobMap.job.lat = last.job.lat; jobMap.job.lng = last.job.lng;
+      if (jobMap.cm) jobMap.cm.setLatLng([last.job.lat, last.job.lng]);
+      const la = $('#lnk-apple'), lg = $('#lnk-google');
+      if (la) la.href = appleLink(last.job.lat, last.job.lng);
+      if (lg) lg.href = mapsLink(last.job.lat, last.job.lng);
+    }
     updateMaps();
   }
 
@@ -815,14 +873,14 @@ async function driverHome() {
 
     if (job) {
       html += `<section class="card job stack"><h2>🛵 Course en cours</h2>
-        <dl class="kv"><dt>Client</dt><dd>${esc(job.client_name)}</dd><dt>Départ</dt><dd>${esc(job.pickup_text || 'Voir la position')}</dd><dt>Destination</dt><dd>${esc(job.destination_text || '—')}</dd>
+        <dl class="kv"><dt>Client</dt><dd>${esc(job.client_name)}</dd><dt>Départ</dt><dd>${esc(job.pickup_text || 'Position GPS du client (voir la carte)')}</dd><dt>Destination</dt><dd>${esc(job.destination_text || '—')}</dd>
         ${job.note ? `<dt>Précision</dt><dd>${esc(job.note)}</dd>` : ''}${job.distance_km != null ? `<dt>Distance</dt><dd>${fmtDist(job.distance_km)}</dd>` : ''}</dl>
         <div class="row"><a class="btn btn-sm grow" href="tel:+225${esc(job.client_phone)}">📞 Appeler</a>
           <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(job.client_phone, 'Bonjour, je suis votre chauffeur Sunrise Space, j\'arrive.')}">WhatsApp</a></div>
         <div id="jobmap" class="map" aria-label="Carte : votre position et le client"></div>
         <p id="jobeta" class="muted">Calcul de l'itinéraire…</p>
-        <div class="row"><a class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">🧭 Plans (Apple)</a>
-          <a class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Google Maps</a></div>
+        <div class="row"><a id="lnk-apple" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">🧭 Plans (Apple)</a>
+          <a id="lnk-google" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Google Maps</a></div>
         <button class="btn btn-ok btn-block" data-act="complete" data-id="${job.id}">Course terminée</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${job.id}">Abandonner</button>
         <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">⚑ Signaler le client</button></div></section>`;

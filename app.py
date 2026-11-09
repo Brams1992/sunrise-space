@@ -399,7 +399,7 @@ def security_headers(resp):
         "script-src 'self' https://unpkg.com; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
         "img-src 'self' data: blob: https://unpkg.com https://*.tile.openstreetmap.org; "
-        "connect-src 'self'; manifest-src 'self'; worker-src 'self'; "
+        "connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
     if request.path.startswith("/api/"):
@@ -717,6 +717,24 @@ def request_history():
         "SELECT * FROM ride_requests WHERE client_id=? ORDER BY id DESC LIMIT 20", (g.user["id"],)
     ).fetchall()
     return jsonify({"requests": [serialize_request_for_client(db, r) for r in rows]})
+
+
+@app.post("/api/requests/<int:rid>/location")
+@auth_required("client")
+def update_request_location(rid):
+    """Le client envoie sa position à jour tant que sa demande est ouverte ou acceptée."""
+    coords = get_coords(body())
+    if not coords:
+        return err("Position invalide.")
+    db = get_db()
+    r = db.execute("SELECT status FROM ride_requests WHERE id=? AND client_id=?", (rid, g.user["id"])).fetchone()
+    if not r:
+        return err("Demande introuvable.", 404)
+    if r["status"] not in ("open", "accepted"):
+        return err("Cette demande est terminée.", 409)
+    db.execute("UPDATE ride_requests SET lat=?, lng=? WHERE id=?", (coords[0], coords[1], rid))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.post("/api/requests/<int:rid>/cancel")
