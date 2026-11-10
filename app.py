@@ -398,7 +398,7 @@ def security_headers(resp):
         "default-src 'self'; "
         "script-src 'self' https://unpkg.com; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-        "img-src 'self' data: blob: https://unpkg.com https://*.tile.openstreetmap.org; "
+        "img-src 'self' data: blob: https://unpkg.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org; "
         "connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )

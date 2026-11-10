@@ -730,6 +730,11 @@ async function refreshJobRoute(force) {
   if (!me) { setEta('En attente de votre position GPS…'); return; }
   if (jobMap.dm) jobMap.dm.setLatLng([me.lat, me.lng]);
   else jobMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  if (distKm(me, job) * 1000 < 30) {  // déjà sur place : pas de ligne à tracer
+    if (jobMap.line) { map.removeLayer(jobMap.line); jobMap.line = null; }
+    setEta('📍 Vous êtes <b>au point de rendez-vous</b>');
+    return;
+  }
   const moved = jobMap.lastFrom ? distKm(jobMap.lastFrom, me) * 1000 : Infinity;
   if (!force && moved < 80 && Date.now() - jobMap.lastAt < 45000) return;
   if (jobMap.busy) return;
@@ -810,6 +815,11 @@ async function updateClientMap(r, force) {
   if (!window.L || !map) { setCEta(`Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`); return; }
   if (cliMap.dm) cliMap.dm.setLatLng([me.lat, me.lng]);
   else cliMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  if (distKm(me, dest) * 1000 < 30) {  // le chauffeur est là : pas de ligne à tracer
+    if (cliMap.line) { map.removeLayer(cliMap.line); cliMap.line = null; }
+    setCEta('🏍️ Le chauffeur est <b>tout près</b> de vous');
+    return;
+  }
   const moved = cliMap.lastFrom ? distKm(cliMap.lastFrom, me) * 1000 : Infinity;
   if (!force && moved < 80 && Date.now() - cliMap.lastAt < 45000) return;
   if (cliMap.busy) return;
