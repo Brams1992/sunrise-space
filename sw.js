@@ -1,6 +1,6 @@
 // Service worker Sunrise Space : l'application s'ouvre même avec un réseau faible.
 // Les appels /api ne sont JAMAIS mis en cache (positions et statuts doivent être frais).
-const CACHE = "sunrise-space-v2";
+const CACHE = "sunrise-space-v3";
 const SHELL = ["/", "/style.css", "/app.js", "/manifest.webmanifest", "/icon.svg",
                "/icon-192.png", "/icon-512.png"];
 

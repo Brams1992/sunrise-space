@@ -204,3 +204,16 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .conv { text-align: left; width: 100%; font: inherit; cursor: pointer; }
 .conv.new { border-color: var(--sun); background: #FFF8EC; }
 .center { text-align: center; }
+
+/* ---------- Mise en évidence des nouveautés (clignotement) ---------- */
+@keyframes blinkCard { 0%, 100% { background: #FFF8EC; box-shadow: 0 0 0 2px var(--sun), 0 0 0 0 rgba(255,122,26,.55); } 50% { background: #FFE2B8; box-shadow: 0 0 0 3px var(--sun), 0 0 0 10px rgba(255,122,26,0); } }
+@keyframes blinkChip { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@keyframes blinkBar { 0%, 100% { background: var(--sun); color: var(--night); } 50% { background: var(--night); color: var(--gold, #FFC83D); } }
+@keyframes ringDot { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.35); } }
+.ann.new, .conv.new { animation: blinkCard 1.1s ease-in-out infinite; border-color: var(--sun); border-width: 2px; }
+.ann.new h4 .chip { animation: blinkChip .8s steps(2, start) infinite; background: var(--sun); color: var(--night); font-weight: 800; }
+.bubble.new { animation: blinkCard 1.1s ease-in-out infinite; }
+.dot { animation: ringDot .9s ease-in-out infinite; }
+.annbar { display: block; width: 100%; border: 0; padding: 12px 14px; font: inherit; font-weight: 800; font-size: .95rem; text-align: center; cursor: pointer; background: var(--sun); color: var(--night); animation: blinkBar 1.1s ease-in-out infinite; }
+.annbar[hidden] { display: none; }
+@media (prefers-reduced-motion: reduce) { .ann.new, .conv.new, .bubble.new, .annbar, .dot, .ann.new h4 .chip { animation: none; } .annbar { background: var(--sun); } }

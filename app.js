@@ -231,7 +231,7 @@ document.addEventListener('click', async (e) => {
 function render() {
   clearTimers();
   clearInterval(state.unreadTimer);
-  state.lastUnread = null;
+  state.lastUnread = null; state.unread = 0;
   state.tab = null;
   if (!state.user) return renderAuth();
   if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
@@ -247,6 +247,7 @@ function renderShell(role, tabs) {
         <div class="brand"><img src="/icon-192.png" alt="" width="30" height="30"><span>Sunrise Space</span></div>
         <div class="who">${esc(state.user.name)}<br><span style="opacity:.7">${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur' }[role]}</span></div>
       </header>
+      <button class="annbar" id="annbar" hidden></button>
       <main id="main"></main>
     </div>
     <nav class="bottomnav" aria-label="Navigation"><div class="inner">
@@ -259,10 +260,22 @@ function renderShell(role, tabs) {
   state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
 }
 
+function updateBanner() {
+  const b = $('#annbar');
+  if (!b) return;
+  const n = state.unread || 0;
+  const admin = state.user && state.user.role === 'admin';
+  if (!n || state.tab === 'inbox') { b.hidden = true; return; }
+  b.hidden = false;
+  b.textContent = admin ? `✉️ ${n} nouveau${n > 1 ? 'x' : ''} message${n > 1 ? 's' : ''} — toucher pour lire` : `📣 ${n > 1 ? n + ' nouveautés' : 'Nouveau message'} de Sunrise Space — toucher pour lire`;
+  b.onclick = () => openTab(state.user.role, 'inbox');
+}
+
 async function refreshUnread() {
   if (!state.user) return;
   try {
     const { unread } = await api('/api/inbox/unread');
+    state.unread = unread; updateBanner();
     const d = $('#inbox-dot');
     if (d) { d.hidden = !unread; d.textContent = unread > 9 ? '9+' : String(unread || ''); }
     if (state.lastUnread != null && unread > state.lastUnread && state.tab !== 'inbox') toast(state.user.role === 'admin' ? 'Nouveau message reçu' : 'Nouveau message de Sunrise Space');
@@ -276,6 +289,7 @@ function openTab(role, tab) {
   state.onPos = null;
   $$('.bottomnav [data-tab]').forEach((b) => { if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   window.scrollTo(0, 0);
+  updateBanner();
   const views = {
     client: { nearby: clientNearby, request: clientRequest, inbox: userInbox, account: accountView },
     driver: { home: driverHome, inbox: userInbox, account: accountView },
