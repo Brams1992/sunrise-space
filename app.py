@@ -104,6 +104,27 @@ CREATE TABLE IF NOT EXISTS reports(
   created_at TEXT NOT NULL,
   handled_at TEXT
 );
+CREATE TABLE IF NOT EXISTS announcements(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  audience TEXT NOT NULL DEFAULT 'all' CHECK(audience IN ('all','client','driver')),
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS announcement_reads(
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  announcement_id INTEGER NOT NULL REFERENCES announcements(id) ON DELETE CASCADE,
+  PRIMARY KEY(user_id, announcement_id)
+);
+CREATE TABLE IF NOT EXISTS messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  sender TEXT NOT NULL CHECK(sender IN ('user','admin')),
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_drivers_search ON drivers(approval, availability);
 CREATE INDEX IF NOT EXISTS idx_req_status ON ride_requests(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_req_client ON ride_requests(client_id, status);
@@ -282,6 +303,14 @@ def normalize_phone(raw):
 
 def clean(value, max_len):
     return re.sub(r"\s+", " ", str(value or "")).strip()[:max_len]
+
+
+def clean_text(value, max_len):
+    """Texte multi-lignes (messages) : garde les retours à la ligne, limite les lignes vides."""
+    t = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+    return t[:max_len]
 
 
 def get_coords(data):
@@ -869,6 +898,7 @@ def admin_stats():
         "requests_today": one("SELECT COUNT(*) FROM ride_requests WHERE created_at>=?", (today,)),
         "rides_completed": one("SELECT COUNT(*) FROM ride_requests WHERE status='completed'"),
         "reports_open": one("SELECT COUNT(*) FROM reports WHERE status='open'"),
+        "messages_unread": one("SELECT COUNT(*) FROM messages WHERE sender='user' AND read_at IS NULL"),
     })
 
 
@@ -979,6 +1009,189 @@ def admin_report_handle(rid):
         db.execute("UPDATE drivers SET availability='unavailable' WHERE user_id=?", (r["target_user_id"],))
     db.commit()
     return jsonify({"ok": True})
+
+
+# --- Messagerie : annonces + boîte de réception --------------------------------
+MSG_MAX = 1000
+ANN_TITLE_MAX = 80
+ANN_BODY_MAX = 1500
+AUDIENCES = {"all": "Tout le monde", "client": "Clients", "driver": "Chauffeurs"}
+
+
+def ann_cutoff():
+    """Les annonces restent visibles 30 jours dans la boîte de réception."""
+    return ts(now() - timedelta(days=30))
+
+
+def unread_for_user(db, user):
+    ann = db.execute(
+        """SELECT COUNT(*) FROM announcements a
+           WHERE a.audience IN ('all', ?) AND a.created_at>=?
+             AND NOT EXISTS (SELECT 1 FROM announcement_reads r WHERE r.announcement_id=a.id AND r.user_id=?)""",
+        (user["role"], ann_cutoff(), user["id"]),
+    ).fetchone()[0]
+    msg = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE user_id=? AND sender='admin' AND read_at IS NULL", (user["id"],)
+    ).fetchone()[0]
+    return ann + msg
+
+
+@app.get("/api/inbox/unread")
+@auth_required()
+def inbox_unread():
+    db = get_db()
+    if g.user["role"] == "admin":
+        n = db.execute("SELECT COUNT(*) FROM messages WHERE sender='user' AND read_at IS NULL").fetchone()[0]
+    else:
+        n = unread_for_user(db, g.user)
+    return jsonify({"unread": n})
+
+
+@app.get("/api/inbox")
+@auth_required("client", "driver")
+def inbox():
+    db = get_db()
+    u = g.user
+    anns = db.execute(
+        """SELECT a.id, a.title, a.body, a.created_at,
+                  CASE WHEN EXISTS (SELECT 1 FROM announcement_reads r WHERE r.announcement_id=a.id AND r.user_id=?)
+                       THEN 0 ELSE 1 END AS unread
+           FROM announcements a WHERE a.audience IN ('all', ?) AND a.created_at>=?
+           ORDER BY a.id DESC LIMIT 50""",
+        (u["id"], u["role"], ann_cutoff()),
+    ).fetchall()
+    msgs = db.execute(
+        "SELECT id, sender, body, created_at, read_at FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 100",
+        (u["id"],),
+    ).fetchall()
+    msgs = [dict(m) for m in reversed(msgs)]
+    for m in msgs:
+        m["unread"] = 1 if (m["sender"] == "admin" and not m["read_at"]) else 0
+    return jsonify({"announcements": [dict(a) for a in anns], "messages": msgs})
+
+
+@app.post("/api/inbox/read")
+@auth_required("client", "driver")
+def inbox_read():
+    db = get_db()
+    u = g.user
+    db.execute(
+        """INSERT INTO announcement_reads(user_id, announcement_id)
+           SELECT ?, a.id FROM announcements a
+           WHERE a.audience IN ('all', ?) AND a.created_at>=?
+             AND NOT EXISTS (SELECT 1 FROM announcement_reads r WHERE r.announcement_id=a.id AND r.user_id=?)""",
+        (u["id"], u["role"], ann_cutoff(), u["id"]),
+    )
+    db.execute(
+        "UPDATE messages SET read_at=? WHERE user_id=? AND sender='admin' AND read_at IS NULL", (ts(), u["id"])
+    )
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/inbox/messages")
+@auth_required("client", "driver")
+def inbox_send():
+    text = clean_text(body().get("body"), MSG_MAX)
+    if not text:
+        return err("Écrivez votre message.")
+    db = get_db()
+    recent = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE user_id=? AND sender='user' AND created_at>?",
+        (g.user["id"], ts(now() - timedelta(hours=1))),
+    ).fetchone()[0]
+    if recent >= 20:
+        return err("Trop de messages envoyés. Réessayez dans un moment.", 429)
+    db.execute("INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)",
+               (g.user["id"], "user", text, ts()))
+    db.commit()
+    return jsonify({"ok": True}), 201
+
+
+@app.post("/api/admin/announcements")
+@auth_required("admin")
+def admin_announce():
+    data = body()
+    audience = data.get("audience", "all")
+    title = clean(data.get("title"), ANN_TITLE_MAX)
+    text = clean_text(data.get("body"), ANN_BODY_MAX)
+    if audience not in AUDIENCES:
+        return err("Destinataires invalides.")
+    if not title or not text:
+        return err("Ajoutez un titre et un message.")
+    db = get_db()
+    aid = db.insert("INSERT INTO announcements(audience,title,body,created_at) VALUES(?,?,?,?)",
+                    (audience, title, text, ts()))
+    db.commit()
+    return jsonify({"ok": True, "id": aid}), 201
+
+
+@app.get("/api/admin/announcements")
+@auth_required("admin")
+def admin_announcements():
+    db = get_db()
+    rows = db.execute(
+        """SELECT a.id, a.audience, a.title, a.body, a.created_at,
+                  (SELECT COUNT(*) FROM announcement_reads r WHERE r.announcement_id=a.id) AS reads,
+                  (SELECT COUNT(*) FROM users u WHERE u.role!='admin' AND u.created_at<=a.created_at
+                     AND (a.audience='all' OR u.role=a.audience)) AS audience_size
+           FROM announcements a ORDER BY a.id DESC LIMIT 100"""
+    ).fetchall()
+    out = [dict(r) for r in rows]
+    for r in out:
+        r["audience_label"] = AUDIENCES.get(r["audience"], r["audience"])
+    return jsonify({"announcements": out})
+
+
+@app.delete("/api/admin/announcements/<int:aid>")
+@auth_required("admin")
+def admin_announcement_delete(aid):
+    db = get_db()
+    db.execute("DELETE FROM announcement_reads WHERE announcement_id=?", (aid,))
+    db.execute("DELETE FROM announcements WHERE id=?", (aid,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/conversations")
+@auth_required("admin")
+def admin_conversations():
+    rows = get_db().execute(
+        """SELECT u.id, u.name, u.phone, u.role, m.body AS last_body, m.created_at AS last_at, m.sender AS last_sender,
+                  (SELECT COUNT(*) FROM messages x WHERE x.user_id=u.id AND x.sender='user' AND x.read_at IS NULL) AS unread
+           FROM users u JOIN messages m ON m.id=(SELECT MAX(id) FROM messages WHERE user_id=u.id)
+           ORDER BY m.id DESC LIMIT 100"""
+    ).fetchall()
+    return jsonify({"conversations": [dict(r) for r in rows]})
+
+
+@app.get("/api/admin/conversations/<int:uid>")
+@auth_required("admin")
+def admin_conversation(uid):
+    db = get_db()
+    u = db.execute("SELECT id, name, phone, role FROM users WHERE id=? AND role!='admin'", (uid,)).fetchone()
+    if not u:
+        return err("Utilisateur introuvable.", 404)
+    db.execute("UPDATE messages SET read_at=? WHERE user_id=? AND sender='user' AND read_at IS NULL", (ts(), uid))
+    db.commit()
+    msgs = db.execute(
+        "SELECT id, sender, body, created_at FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,)
+    ).fetchall()
+    return jsonify({"user": dict(u), "messages": [dict(m) for m in reversed(msgs)]})
+
+
+@app.post("/api/admin/conversations/<int:uid>")
+@auth_required("admin")
+def admin_reply(uid):
+    text = clean_text(body().get("body"), MSG_MAX)
+    if not text:
+        return err("Écrivez votre message.")
+    db = get_db()
+    if not db.execute("SELECT 1 FROM users WHERE id=? AND role!='admin'", (uid,)).fetchone():
+        return err("Utilisateur introuvable.", 404)
+    db.execute("INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)", (uid, "admin", text, ts()))
+    db.commit()
+    return jsonify({"ok": True}), 201
 
 
 # --- Erreurs JSON -------------------------------------------------------------

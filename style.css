@@ -184,3 +184,23 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 @media (min-width: 800px) { .list.cols { grid-template-columns: 1fr 1fr; } }
 .item h3 { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .item .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* ---------- Messagerie ---------- */
+.bottomnav button .ic { position: relative; }
+.dot { position: absolute; top: -4px; right: -10px; min-width: 18px; height: 18px; padding: 0 4px; box-sizing: border-box; border-radius: 99px; background: var(--danger); color: #fff; font: 700 .68rem/18px inherit; font-style: normal; text-align: center; }
+.thread { display: flex; flex-direction: column; gap: 8px; max-height: 340px; overflow-y: auto; padding: 10px; background: #F4F6FA; border-radius: 14px; }
+.thread.tall { max-height: 55vh; min-height: 200px; }
+.bubble { max-width: 85%; padding: 9px 12px; border-radius: 16px; font-size: .95rem; line-height: 1.35; word-break: break-word; }
+.bubble time, .ann time, .conv time { display: block; font-size: .72rem; opacity: .65; margin-top: 4px; }
+.bubble.me { align-self: flex-end; background: var(--night); color: #fff; border-bottom-right-radius: 4px; }
+.bubble.them { align-self: flex-start; background: #fff; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+.bubble.new { box-shadow: 0 0 0 2px var(--sun); }
+.msgform { display: flex; gap: 8px; align-items: flex-end; }
+.msgform textarea { flex: 1; min-height: 48px; resize: vertical; }
+.ann { border: 1px solid var(--line); border-radius: 14px; padding: 12px; background: #fff; }
+.ann.new { border-color: var(--sun); background: #FFF8EC; }
+.ann h4 { margin: 0 0 6px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ann p { margin: 0; }
+.conv { text-align: left; width: 100%; font: inherit; cursor: pointer; }
+.conv.new { border-color: var(--sun); background: #FFF8EC; }
+.center { text-align: center; }

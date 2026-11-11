@@ -230,11 +230,13 @@ document.addEventListener('click', async (e) => {
 /* ---------- Rendu principal ---------- */
 function render() {
   clearTimers();
+  clearInterval(state.unreadTimer);
+  state.lastUnread = null;
   state.tab = null;
   if (!state.user) return renderAuth();
-  if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['account', '👤', 'Compte']]);
-  if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['account', '👤', 'Compte']]);
-  if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements']]);
+  if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
+  if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
+  if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
 }
 
 function renderShell(role, tabs) {
@@ -248,10 +250,24 @@ function renderShell(role, tabs) {
       <main id="main"></main>
     </div>
     <nav class="bottomnav" aria-label="Navigation"><div class="inner">
-      ${tabs.map(([id, ic, label]) => `<button data-tab="${id}"><span class="ic" aria-hidden="true">${ic}</span>${esc(label)}</button>`).join('')}
+      ${tabs.map(([id, ic, label]) => `<button data-tab="${id}"><span class="ic" aria-hidden="true">${ic}${id === 'inbox' ? '<i class="dot" id="inbox-dot" hidden></i>' : ''}</span>${esc(label)}</button>`).join('')}
     </div></nav>`;
   $$('.bottomnav [data-tab]').forEach((b) => (b.onclick = () => openTab(role, b.dataset.tab)));
   openTab(role, first);
+  refreshUnread();
+  clearInterval(state.unreadTimer);
+  state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
+}
+
+async function refreshUnread() {
+  if (!state.user) return;
+  try {
+    const { unread } = await api('/api/inbox/unread');
+    const d = $('#inbox-dot');
+    if (d) { d.hidden = !unread; d.textContent = unread > 9 ? '9+' : String(unread || ''); }
+    if (state.lastUnread != null && unread > state.lastUnread && state.tab !== 'inbox') toast(state.user.role === 'admin' ? 'Nouveau message reçu' : 'Nouveau message de Sunrise Space');
+    state.lastUnread = unread;
+  } catch { /* on réessaiera */ }
 }
 
 function openTab(role, tab) {
@@ -261,9 +277,9 @@ function openTab(role, tab) {
   $$('.bottomnav [data-tab]').forEach((b) => { if (b.dataset.tab === tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
   window.scrollTo(0, 0);
   const views = {
-    client: { nearby: clientNearby, request: clientRequest, account: accountView },
-    driver: { home: driverHome, account: accountView },
-    admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, reports: adminReports },
+    client: { nearby: clientNearby, request: clientRequest, inbox: userInbox, account: accountView },
+    driver: { home: driverHome, inbox: userInbox, account: accountView },
+    admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, reports: adminReports, inbox: adminInbox },
   };
   views[role][tab]();
 }
@@ -355,6 +371,7 @@ function renderAuth() {
 }
 
 async function logout() {
+  clearInterval(state.unreadTimer);
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* on se déconnecte quand même */ }
   localStorage.removeItem('ss_token');
   stopLocSharing();
@@ -957,6 +974,7 @@ async function adminStats() {
         ${card(s.drivers_available_now, 'Chauffeurs disponibles maintenant')}
         ${card(s.drivers_pending, 'Chauffeurs à valider', s.drivers_pending > 0)}
         ${card(s.reports_open, 'Signalements ouverts', s.reports_open > 0)}
+        ${card(s.messages_unread, 'Messages non lus', s.messages_unread > 0)}
         ${card(s.requests_open, 'Demandes en attente')}
         ${card(s.clients, 'Clients inscrits')}
         ${card(s.drivers, 'Chauffeurs inscrits')}
@@ -1012,12 +1030,14 @@ async function adminUsers() {
       $('#ul').innerHTML = users.length ? users.map((u) => `<article class="card item">
         <h3>${esc(u.name)} <span class="chip">${u.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${u.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</h3>
         <p class="muted">${esc(fmtPhone(u.phone))} · inscrit le ${esc(u.created_at.slice(0, 10))}</p>
-        <div class="actions"><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button></div></article>`).join('')
+        <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button></div></article>`).join('')
         : empty('🔍', 'Aucun résultat', '');
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
   let t; $('#uq').oninput = (e) => { q = e.target.value.trim(); clearTimeout(t); t = setTimeout(load, 300); };
   $('#ul').addEventListener('click', async (e) => {
+    const w = e.target.closest('[data-write]');
+    if (w) { state.openThread = { id: +w.dataset.write, name: w.dataset.name }; return openTab('admin', 'inbox'); }
     const b = e.target.closest('[data-block]');
     if (!b) return;
     if (b.dataset.block === '1' && !confirm('Suspendre ce compte ? La personne sera déconnectée.')) return;
@@ -1062,6 +1082,144 @@ async function adminReports() {
 }
 
 /* ---------- Démarrage ---------- */
+
+/* ======================= MESSAGERIE ======================= */
+const fmtWhen = (s) => {
+  if (!s) return '';
+  const d = new Date(String(s).replace(' ', 'T') + 'Z');
+  return d.toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+};
+const nl = (t) => esc(t).replace(/\n/g, '<br>');
+const bubbles = (msgs, mine) => msgs.length
+  ? msgs.map((m) => `<div class="bubble ${m.sender === mine ? 'me' : 'them'}${m.unread ? ' new' : ''}">${nl(m.body)}<time>${fmtWhen(m.created_at)}</time></div>`).join('')
+  : '<p class="muted center">Aucun message pour le moment.</p>';
+const stickBottom = (el) => { if (el) el.scrollTop = el.scrollHeight; };
+
+async function userInbox() {
+  $('#main').innerHTML = `<h2>Messages</h2>
+    <section class="card stack"><h3>📣 Annonces de Sunrise Space</h3><div id="ann" class="list"></div></section>
+    <section class="card stack"><h3>💬 Écrire à l'équipe Sunrise Space</h3>
+      <p class="muted">Une question, une idée, un problème ? Écrivez-nous ici, nous vous répondons dans cette boîte.</p>
+      <div id="thread" class="thread" aria-live="polite"></div>
+      <form id="mf" class="msgform"><textarea id="mt" maxlength="1000" rows="2" placeholder="Votre message…" aria-label="Votre message"></textarea>
+        <button class="btn btn-primary" id="ms">Envoyer</button></form></section>`;
+  let sig = '';
+  async function load() {
+    try {
+      const r = await api('/api/inbox');
+      const key = JSON.stringify([r.announcements.map((a) => [a.id, a.unread]), r.messages.map((m) => [m.id, m.unread])]);
+      if (key !== sig) {
+        sig = key;
+        $('#ann').innerHTML = r.announcements.length ? r.announcements.map((a) => `<article class="ann${a.unread ? ' new' : ''}">
+          <h4>${a.unread ? '<span class="chip warn">Nouveau</span> ' : ''}${esc(a.title)}</h4><p>${nl(a.body)}</p><time>${fmtWhen(a.created_at)}</time></article>`).join('')
+          : '<p class="muted">Aucune annonce pour le moment.</p>';
+        const th = $('#thread'); th.innerHTML = bubbles(r.messages, 'user'); stickBottom(th);
+      }
+      if (r.announcements.some((a) => a.unread) || r.messages.some((m) => m.unread)) {
+        await api('/api/inbox/read', { method: 'POST' });
+        refreshUnread();
+      }
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  $('#mf').onsubmit = async (ev) => {
+    ev.preventDefault();
+    const t = $('#mt').value.trim();
+    if (!t) return;
+    $('#ms').disabled = true;
+    try { await api('/api/inbox/messages', { method: 'POST', body: { body: t } }); $('#mt').value = ''; sig = ''; await load(); }
+    catch (e) { toast(e.message, 'bad'); }
+    finally { $('#ms').disabled = false; }
+  };
+  await load(); every(15000, load);
+}
+
+async function adminInbox() {
+  let view = 'conv', thread = state.openThread || null;
+  state.openThread = null;
+  $('#main').innerHTML = '<h2>Messages</h2><div id="ft"></div><div id="box" class="stack"></div>';
+  const tabs = () => { $('#ft').innerHTML = thread ? '' : filterTabs([['conv', 'Boîte de réception'], ['ann', 'Annonces']], view, 'v'); $$('#ft [data-v]').forEach((b) => (b.onclick = () => { view = b.dataset.v; draw(); })); };
+
+  async function drawConversations() {
+    try {
+      const { conversations } = await api('/api/admin/conversations');
+      $('#box').innerHTML = conversations.length ? `<div class="list cols">${conversations.map((c) => `<button class="card item conv${c.unread ? ' new' : ''}" data-uid="${c.id}" data-name="${esc(c.name)}">
+        <h3>${esc(c.name)} <span class="chip">${c.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${c.unread ? `<span class="chip warn">${c.unread} non lu${c.unread > 1 ? 's' : ''}</span>` : ''}</h3>
+        <p class="muted">${c.last_sender === 'admin' ? 'Vous : ' : ''}${esc(c.last_body.slice(0, 90))}</p><time>${fmtWhen(c.last_at)}</time></button>`).join('')}</div>`
+        : empty('✉️', 'Boîte vide', "Les messages des utilisateurs arriveront ici. Pour écrire à quelqu'un, ouvrez l'onglet Utilisateurs.");
+      $$('#box [data-uid]').forEach((b) => (b.onclick = () => { thread = { id: +b.dataset.uid, name: b.dataset.name }; draw(); }));
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+
+  async function drawThread() {
+    $('#box').innerHTML = `<button class="btn btn-ghost btn-sm" id="back">← Retour</button>
+      <section class="card stack"><h3>💬 ${esc(thread.name)}</h3><div id="thread" class="thread tall"></div>
+      <form id="mf" class="msgform"><textarea id="mt" maxlength="1000" rows="2" placeholder="Votre réponse…" aria-label="Votre réponse"></textarea><button class="btn btn-primary" id="ms">Envoyer</button></form></section>`;
+    $('#back').onclick = () => { thread = null; draw(); };
+    let sig = '';
+    async function load() {
+      try {
+        const r = await api(`/api/admin/conversations/${thread.id}`);
+        const key = r.messages.map((m) => m.id).join(',');
+        if (key !== sig) { sig = key; const th = $('#thread'); th.innerHTML = bubbles(r.messages, 'admin'); stickBottom(th); }
+        refreshUnread();
+      } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+    }
+    $('#mf').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const t = $('#mt').value.trim();
+      if (!t) return;
+      $('#ms').disabled = true;
+      try { await api(`/api/admin/conversations/${thread.id}`, { method: 'POST', body: { body: t } }); $('#mt').value = ''; sig = ''; await load(); }
+      catch (e) { toast(e.message, 'bad'); }
+      finally { $('#ms').disabled = false; }
+    };
+    await load(); every(10000, load);
+  }
+
+  async function drawAnnouncements() {
+    $('#box').innerHTML = `<section class="card stack"><h3>📣 Nouvelle annonce</h3>
+      <p class="muted">Elle apparaîtra dans la boîte de réception des personnes choisies, avec une pastille « non lu ».</p>
+      <form id="af" class="stack"><label>Destinataires<select id="aud"><option value="all">Tout le monde</option><option value="client">Clients</option><option value="driver">Chauffeurs</option></select></label>
+      <label>Titre<input id="at" maxlength="80" placeholder="Ex. La phase test commence"></label>
+      <label>Message<textarea id="ab" maxlength="1500" rows="4" placeholder="Votre information…"></textarea></label>
+      <button class="btn btn-primary btn-block" id="as">Envoyer l'annonce</button></form></section>
+      <h3>Annonces envoyées</h3><div id="al" class="list"></div>`;
+    async function list() {
+      try {
+        const { announcements } = await api('/api/admin/announcements');
+        $('#al').innerHTML = announcements.length ? announcements.map((a) => `<article class="card item"><h3>${esc(a.title)} <span class="chip">${esc(a.audience_label)}</span></h3>
+          <p>${nl(a.body)}</p><p class="muted">${fmtWhen(a.created_at)} · lue par ${a.reads} / ${a.audience_size}</p>
+          <div class="actions"><button class="btn btn-danger btn-sm" data-del="${a.id}">Supprimer</button></div></article>`).join('')
+          : '<p class="muted">Aucune annonce envoyée.</p>';
+      } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+    }
+    $('#af').onsubmit = async (ev) => {
+      ev.preventDefault();
+      $('#as').disabled = true;
+      try {
+        await api('/api/admin/announcements', { method: 'POST', body: { audience: $('#aud').value, title: $('#at').value, body: $('#ab').value } });
+        $('#at').value = ''; $('#ab').value = ''; toast('Annonce envoyée'); list();
+      } catch (e) { toast(e.message, 'bad'); }
+      finally { $('#as').disabled = false; }
+    };
+    $('#al').addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-del]');
+      if (!b || !confirm('Supprimer cette annonce ? Elle disparaîtra des boîtes de réception.')) return;
+      try { await api(`/api/admin/announcements/${b.dataset.del}`, { method: 'DELETE' }); toast('Annonce supprimée'); list(); }
+      catch (err) { toast(err.message, 'bad'); }
+    });
+    await list();
+  }
+
+  function draw() {
+    clearTimers(); tabs();
+    if (thread) return drawThread();
+    if (view === 'ann') return drawAnnouncements();
+    drawConversations(); every(15000, drawConversations);
+  }
+  draw();
+}
+
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   try { state.meta = await api('/api/meta'); }
