@@ -978,8 +978,28 @@ function filterTabs(items, current, attr) {
   return `<div class="tabs">${items.map(([v, l]) => `<button data-${attr}="${v}" aria-pressed="${v === current}">${esc(l)}</button>`).join('')}</div>`;
 }
 
+async function downloadBackup(btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/admin/backup', { headers: { Authorization: 'Bearer ' + state.token } });
+    if (!res.ok) throw new Error('Sauvegarde impossible pour le moment.');
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `sunrise-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    toast('Sauvegarde téléchargée. Gardez ce fichier en lieu sûr.');
+  } catch (e) { toast(e.message, 'bad'); }
+  finally { btn.disabled = false; }
+}
+
 async function adminStats() {
-  $('#main').innerHTML = '<div id="st" class="stack"></div>';
+  $('#main').innerHTML = `<div id="st" class="stack"></div>
+    <section class="card stack"><h3>💾 Sauvegarde</h3>
+      <p class="muted">Téléchargez une copie de toutes les données (comptes, courses, messages…). Ce fichier contient des informations personnelles : gardez-le privé.</p>
+      <button class="btn btn-ghost btn-block" id="bk">Télécharger une sauvegarde</button></section>`;
+  $('#bk').onclick = (e) => downloadBackup(e.currentTarget);
   async function load() {
     try {
       const s = await api('/api/admin/stats');

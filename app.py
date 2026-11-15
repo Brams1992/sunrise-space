@@ -5,6 +5,7 @@ Mise en relation clients <-> chauffeurs de moto-taxi, Côte d'Ivoire.
 Lancer :  python app.py      (http://localhost:5000)
 """
 import hashlib
+import json
 import math
 import os
 import re
@@ -13,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_from_directory
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -206,7 +207,7 @@ def schema_sql():
     return [part.strip() for part in sql.split(";") if part.strip()]
 
 
-def init_db():
+def init_db(create_admin=True):
     db = DB()
     try:
         if USE_PG:
@@ -216,7 +217,8 @@ def init_db():
         for statement in schema_sql():
             db.execute(statement)
         db.commit()
-        ensure_admin(db)
+        if create_admin:
+            ensure_admin(db)
     finally:
         db.close()
 
@@ -1011,6 +1013,28 @@ def admin_report_handle(rid):
     return jsonify({"ok": True})
 
 
+# --- Sauvegarde ----------------------------------------------------------------
+# Les sessions (table tokens) ne sont pas sauvegardées : chacun se reconnecte après une restauration.
+BACKUP_TABLES = [("users", "id"), ("drivers", "user_id"), ("ride_requests", "id"), ("reports", "id"),
+                 ("announcements", "id"), ("announcement_reads", "user_id, announcement_id"), ("messages", "id")]
+
+
+def export_all(db):
+    data = {"format": "sunrise-backup-1", "created_at": ts(), "engine": "postgresql" if USE_PG else "sqlite", "tables": {}}
+    for table, order in BACKUP_TABLES:
+        data["tables"][table] = [dict(r) for r in db.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()]
+    return data
+
+
+@app.get("/api/admin/backup")
+@auth_required("admin")
+def admin_backup():
+    payload = json.dumps(export_all(get_db()), ensure_ascii=False)
+    name = "sunrise-sauvegarde-%s.json" % now().strftime("%Y-%m-%d")
+    return Response(payload, mimetype="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
 # --- Messagerie : annonces + boîte de réception --------------------------------
 MSG_MAX = 1000
 ANN_TITLE_MAX = 80
@@ -1217,7 +1241,8 @@ def server_error(_e):
     return err("Erreur du serveur. Réessayez.", 500)
 
 
-init_db()
+if not os.environ.get("SUNRISE_SKIP_INIT"):   # SUNRISE_SKIP_INIT : utilisé par restore_backup.py
+    init_db()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
