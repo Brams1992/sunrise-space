@@ -32,6 +32,7 @@ else:
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
 REQUEST_TTL_MIN = 30         # une demande non prise expire après 30 min
 TOKEN_TTL_DAYS = 30
+VEHICLE_TYPES = {"moto": "Moto-taxi", "voiture": "Taxi (voiture)", "tricycle": "Tricycle"}
 NEARBY_RADIUS_KM = 15.0      # rayon par défaut de recherche
 MAX_LOGIN_FAILS = 5
 LOGIN_LOCK_SECONDS = 300
@@ -81,11 +82,13 @@ CREATE TABLE IF NOT EXISTS users(
   phone TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   is_blocked INTEGER NOT NULL DEFAULT 0,
+  must_change_password INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS drivers(
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   plate TEXT NOT NULL,
+  vehicle_type TEXT NOT NULL DEFAULT 'moto',
   moto_model TEXT,
   permis TEXT,
   commune TEXT,
@@ -94,6 +97,13 @@ CREATE TABLE IF NOT EXISTS drivers(
   approval_note TEXT,
   availability TEXT NOT NULL DEFAULT 'unavailable' CHECK(availability IN ('available','busy','unavailable')),
   lat REAL, lng REAL, location_at TEXT
+);
+CREATE TABLE IF NOT EXISTS password_resets(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dismissed')),
+  created_at TEXT NOT NULL,
+  handled_at TEXT
 );
 CREATE TABLE IF NOT EXISTS tokens(
   token_hash TEXT PRIMARY KEY,
@@ -107,6 +117,7 @@ CREATE TABLE IF NOT EXISTS ride_requests(
   driver_id INTEGER REFERENCES users(id),
   lat REAL NOT NULL, lng REAL NOT NULL,
   pickup_text TEXT, destination_text TEXT, note TEXT,
+  vehicle_type TEXT NOT NULL DEFAULT 'any',
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','accepted','completed','cancelled','expired')),
   created_at TEXT NOT NULL, accepted_at TEXT, closed_at TEXT
 );
@@ -232,6 +243,27 @@ def schema_sql():
     return [part.strip() for part in sql.split(";") if part.strip()]
 
 
+def ensure_column(db, table, column, ddl):
+    """Ajoute une colonne aux bases créées avant cette version (sans toucher aux données existantes)."""
+    def exists():
+        try:
+            db.execute(f"SELECT {column} FROM {table} LIMIT 0")
+            return True
+        except Exception:
+            return False
+        finally:
+            db.rollback()
+    if exists():
+        return
+    try:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        if not exists():   # un autre processus l'a peut-être ajoutée entre-temps
+            raise
+
+
 def init_db(create_admin=True):
     db = DB()
     try:
@@ -242,6 +274,9 @@ def init_db(create_admin=True):
         for statement in schema_sql():
             db.execute(statement)
         db.commit()
+        ensure_column(db, "drivers", "vehicle_type", "TEXT NOT NULL DEFAULT 'moto'")
+        ensure_column(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
         if create_admin:
             ensure_admin(db)
     finally:
@@ -394,6 +429,8 @@ def auth_required(*roles):
                 return err("Ce compte est suspendu. Contactez le support.", 403)
             if roles and row["role"] not in roles:
                 return err("Accès refusé.", 403)
+            if row["must_change_password"] and request.endpoint not in ("change_password", "logout", "me"):
+                return err("Choisissez d'abord un nouveau mot de passe.", 403)
             g.user = row
             g.token_hash = hash_token(token)
             return fn(*a, **kw)
@@ -428,7 +465,8 @@ def expire_requests(db):
 
 
 def user_public(u):
-    return {"id": u["id"], "role": u["role"], "name": u["name"], "phone": u["phone"]}
+    return {"id": u["id"], "role": u["role"], "name": u["name"], "phone": u["phone"],
+            "must_change_password": bool(u["must_change_password"])}
 
 
 def driver_profile(db, user_id):
@@ -436,7 +474,7 @@ def driver_profile(db, user_id):
     if not d:
         return None
     return {
-        "plate": d["plate"], "moto_model": d["moto_model"], "permis": d["permis"],
+        "plate": d["plate"], "vehicle_type": d["vehicle_type"], "moto_model": d["moto_model"], "permis": d["permis"],
         "commune": d["commune"], "whatsapp": d["whatsapp"],
         "approval": d["approval"], "approval_note": d["approval_note"],
         "availability": d["availability"],
@@ -492,7 +530,7 @@ def health():
 
 @app.get("/api/meta")
 def meta():
-    return jsonify({"communes": COMMUNES, "report_reasons": REPORT_REASONS,
+    return jsonify({"communes": COMMUNES, "report_reasons": REPORT_REASONS, "vehicle_types": VEHICLE_TYPES,
                     "default_center": {"lat": 5.3600, "lng": -4.0083}})
 
 
@@ -520,8 +558,11 @@ def register():
         permis = clean(d.get("permis"), 30)
         commune = clean(d.get("commune"), 40)
         whatsapp = normalize_phone(d.get("whatsapp")) if d.get("whatsapp") else phone
+        vehicle_type = d.get("vehicle_type") or "moto"
+        if vehicle_type not in VEHICLE_TYPES:
+            return err("Choisissez votre type de véhicule : moto, voiture ou tricycle.")
         if len(plate) < 3:
-            return err("Entrez la plaque d'immatriculation de la moto.")
+            return err("Entrez la plaque d'immatriculation du véhicule.")
         if len(permis) < 3:
             return err("Entrez votre numéro de permis de conduire.")
         if commune not in COMMUNES:
@@ -529,7 +570,7 @@ def register():
         if not whatsapp:
             return err("Numéro WhatsApp invalide.")
         driver = {"plate": plate, "permis": permis, "commune": commune, "whatsapp": whatsapp,
-                  "moto_model": clean(d.get("moto_model"), 40)}
+                  "vehicle_type": vehicle_type, "moto_model": clean(d.get("moto_model"), 40)}
 
     db = get_db()
     if db.execute("SELECT 1 FROM users WHERE phone=?", (phone,)).fetchone():
@@ -540,8 +581,8 @@ def register():
     )
     if role == "driver":
         db.execute(
-            "INSERT INTO drivers(user_id,plate,moto_model,permis,commune,whatsapp) VALUES(?,?,?,?,?,?)",
-            (uid, driver["plate"], driver["moto_model"], driver["permis"], driver["commune"], driver["whatsapp"]),
+            "INSERT INTO drivers(user_id,plate,vehicle_type,moto_model,permis,commune,whatsapp) VALUES(?,?,?,?,?,?,?)",
+            (uid, driver["plate"], driver["vehicle_type"], driver["moto_model"], driver["permis"], driver["commune"], driver["whatsapp"]),
         )
     db.commit()
     token = issue_token(db, uid)
@@ -589,6 +630,99 @@ def me():
     return jsonify({"user": user_public(g.user), "driver": driver_profile(get_db(), g.user["id"])})
 
 
+# --- Mot de passe : changement, oubli ------------------------------------------
+TEMP_PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # sans 0/O, 1/I/L : facile à recopier
+_forgot_hits = {}                                        # adresse IP -> instants des demandes récentes
+FORGOT_MAX_PER_HOUR = 5
+
+
+@app.post("/api/auth/change-password")
+@auth_required()
+def change_password():
+    data = body()
+    current = str(data.get("current") or "")
+    new = str(data.get("new") or "")
+    key = ("pw", g.user["id"])
+    if login_locked(key):
+        return err("Trop de tentatives. Réessayez dans quelques minutes.", 429)
+    if not check_password_hash(g.user["password_hash"], current):
+        login_failed(key)
+        return err("Le mot de passe actuel est incorrect.", 403)
+    if len(new) < 6 or len(new) > 100:
+        return err("Le nouveau mot de passe doit contenir au moins 6 caractères.")
+    if new == current:
+        return err("Choisissez un mot de passe différent de l'ancien.")
+    _login_fails.pop(key, None)
+    db = get_db()
+    db.execute("UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?",
+               (generate_password_hash(new), g.user["id"]))
+    db.execute("DELETE FROM tokens WHERE user_id=? AND token_hash!=?", (g.user["id"], g.token_hash))  # autres appareils déconnectés
+    db.commit()
+    return jsonify({"ok": True, "user": user_public(db.execute("SELECT * FROM users WHERE id=?", (g.user["id"],)).fetchone())})
+
+
+@app.post("/api/auth/forgot")
+def forgot_password():
+    """Prévient l'équipe : un administrateur vérifie la personne puis lui remet un mot de passe provisoire.
+    La réponse est toujours la même, que le numéro existe ou non (on ne révèle pas qui a un compte)."""
+    phone = normalize_phone(body().get("phone"))
+    if not phone:
+        return err("Numéro invalide. Entrez les 10 chiffres.")
+    ip = request.remote_addr or "?"
+    recent = [t for t in _forgot_hits.get(ip, []) if time.time() - t < 3600]
+    if len(recent) >= FORGOT_MAX_PER_HOUR:
+        return err("Trop de demandes. Réessayez plus tard.", 429)
+    if len(_forgot_hits) > 5000:
+        _forgot_hits.clear()
+    _forgot_hits[ip] = recent + [time.time()]
+    db = get_db()
+    user = db.execute("SELECT id, role FROM users WHERE phone=?", (phone,)).fetchone()
+    if user and user["role"] != "admin" \
+            and not db.execute("SELECT 1 FROM password_resets WHERE user_id=? AND status='open'", (user["id"],)).fetchone():
+        db.execute("INSERT INTO password_resets(user_id, created_at) VALUES(?,?)", (user["id"], ts()))
+        db.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/password-resets")
+@auth_required("admin")
+def admin_password_resets():
+    rows = get_db().execute(
+        """SELECT p.id, p.created_at, u.id AS user_id, u.name, u.phone, u.role, u.is_blocked
+           FROM password_resets p JOIN users u ON u.id=p.user_id
+           WHERE p.status='open' ORDER BY p.id""").fetchall()
+    return jsonify({"requests": [dict(r) for r in rows]})
+
+
+@app.post("/api/admin/password-resets/<int:rid>")
+@auth_required("admin")
+def admin_password_reset_action(rid):
+    action = body().get("action")
+    if action not in ("reset", "dismiss"):
+        return err("Action invalide.")
+    db = get_db()
+    r = db.execute(
+        """SELECT p.id, p.status, u.id AS user_id, u.name, u.phone, u.role
+           FROM password_resets p JOIN users u ON u.id=p.user_id WHERE p.id=?""", (rid,)).fetchone()
+    if not r:
+        return err("Demande introuvable.", 404)
+    if r["status"] != "open":
+        return err("Cette demande a déjà été traitée.", 409)
+    if action == "dismiss":
+        db.execute("UPDATE password_resets SET status='dismissed', handled_at=? WHERE id=?", (ts(), rid))
+        db.commit()
+        return jsonify({"ok": True})
+    if r["role"] == "admin":
+        return err("Le mot de passe d'un administrateur ne se réinitialise pas ici.", 403)
+    temp = "".join(secrets.choice(TEMP_PW_ALPHABET) for _ in range(8))
+    db.execute("UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?",
+               (generate_password_hash(temp), r["user_id"]))
+    db.execute("DELETE FROM tokens WHERE user_id=?", (r["user_id"],))   # on déconnecte tout appareil encore ouvert
+    db.execute("UPDATE password_resets SET status='done', handled_at=? WHERE user_id=? AND status='open'", (ts(), r["user_id"]))
+    db.commit()
+    return jsonify({"ok": True, "temp_password": temp, "name": r["name"], "phone": r["phone"]})
+
+
 # --- Client : chauffeurs proches ---------------------------------------------
 @app.get("/api/drivers/nearby")
 @auth_required("client", "admin")
@@ -603,7 +737,7 @@ def drivers_nearby():
     lat, lng = coords
     cutoff = ts(now() - timedelta(minutes=LOCATION_TTL_MIN))
     rows = get_db().execute(
-        """SELECT u.id, u.name, u.phone, d.plate, d.moto_model, d.commune, d.whatsapp,
+        """SELECT u.id, u.name, u.phone, d.plate, d.vehicle_type, d.moto_model, d.commune, d.whatsapp,
                   d.lat, d.lng, d.location_at
            FROM drivers d JOIN users u ON u.id=d.user_id
            WHERE d.approval='approved' AND d.availability='available' AND u.is_blocked=0
@@ -616,7 +750,7 @@ def drivers_nearby():
         if dist <= radius:
             out.append({
                 "id": r["id"], "name": r["name"], "phone": r["phone"], "whatsapp": r["whatsapp"],
-                "plate": r["plate"], "moto_model": r["moto_model"], "commune": r["commune"],
+                "plate": r["plate"], "vehicle_type": r["vehicle_type"], "moto_model": r["moto_model"], "commune": r["commune"],
                 "lat": r["lat"], "lng": r["lng"], "distance_km": round(dist, 2),
                 "updated_min_ago": minutes_ago(r["location_at"]),
             })
@@ -661,7 +795,7 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
     out = {
         "id": r["id"], "pickup_text": r["pickup_text"], "destination_text": r["destination_text"],
         "note": r["note"], "lat": r["lat"], "lng": r["lng"], "status": r["status"],
-        "client_name": r["client_name"], "age_min": minutes_ago(r["created_at"]),
+        "vehicle_type": r["vehicle_type"], "client_name": r["client_name"], "age_min": minutes_ago(r["created_at"]),
     }
     if dlat is not None:
         out["distance_km"] = round(haversine_km(dlat, dlng, r["lat"], r["lng"]), 2)
@@ -691,7 +825,8 @@ def driver_dashboard():
         rows = db.execute(
             """SELECT r.*, u.name AS client_name, u.phone AS client_phone
                FROM ride_requests r JOIN users u ON u.id=r.client_id
-               WHERE r.status='open' ORDER BY r.id DESC LIMIT 200"""
+               WHERE r.status='open' AND r.vehicle_type IN ('any', ?) ORDER BY r.id DESC LIMIT 200""",
+            (d["vehicle_type"],),
         ).fetchall()
         for r in rows:
             item = serialize_request_for_driver(r, d["lat"], d["lng"], False)
@@ -708,18 +843,18 @@ def serialize_request_for_client(db, r):
         "id": r["id"], "status": r["status"], "pickup_text": r["pickup_text"],
         "destination_text": r["destination_text"], "note": r["note"],
         "lat": r["lat"], "lng": r["lng"], "age_min": minutes_ago(r["created_at"]),
-        "driver": None,
+        "vehicle_type": r["vehicle_type"], "driver": None,
     }
     if r["driver_id"] and r["status"] in ("accepted", "completed"):
         d = db.execute(
-            """SELECT u.id, u.name, u.phone, d.whatsapp, d.plate, d.moto_model, d.lat, d.lng, d.location_at
+            """SELECT u.id, u.name, u.phone, d.whatsapp, d.plate, d.vehicle_type, d.moto_model, d.lat, d.lng, d.location_at
                FROM users u JOIN drivers d ON d.user_id=u.id WHERE u.id=?""",
             (r["driver_id"],),
         ).fetchone()
         if d:
             out["driver"] = {
                 "id": d["id"], "name": d["name"], "phone": d["phone"], "whatsapp": d["whatsapp"],
-                "plate": d["plate"], "moto_model": d["moto_model"],
+                "plate": d["plate"], "vehicle_type": d["vehicle_type"], "moto_model": d["moto_model"],
                 "lat": d["lat"] if r["status"] == "accepted" else None,
                 "lng": d["lng"] if r["status"] == "accepted" else None,
             }
@@ -733,6 +868,9 @@ def create_request():
     coords = get_coords(data)
     if not coords:
         return err("Position de prise en charge invalide.")
+    wanted = data.get("vehicle_type") or "any"
+    if wanted != "any" and wanted not in VEHICLE_TYPES:
+        return err("Type de véhicule invalide.")
     db = get_db()
     expire_requests(db)
     active = db.execute(
@@ -741,10 +879,10 @@ def create_request():
     if active:
         return err("Vous avez déjà une demande en cours.", 409)
     new_id = db.insert(
-        """INSERT INTO ride_requests(client_id,lat,lng,pickup_text,destination_text,note,created_at)
-           VALUES(?,?,?,?,?,?,?)""",
+        """INSERT INTO ride_requests(client_id,lat,lng,pickup_text,destination_text,note,vehicle_type,created_at)
+           VALUES(?,?,?,?,?,?,?,?)""",
         (g.user["id"], coords[0], coords[1], clean(data.get("pickup_text"), 120),
-         clean(data.get("destination_text"), 120), clean(data.get("note"), 200), ts()),
+         clean(data.get("destination_text"), 120), clean(data.get("note"), 200), wanted, ts()),
     )
     db.commit()
     r = db.execute("SELECT * FROM ride_requests WHERE id=?", (new_id,)).fetchone()
@@ -821,11 +959,15 @@ def accept_request(rid):
         return err("Passez en « Disponible » pour accepter une demande.", 409)
     expire_requests(db)
     cur = db.execute(
-        "UPDATE ride_requests SET status='accepted', driver_id=?, accepted_at=? WHERE id=? AND status='open'",
-        (g.user["id"], ts(), rid),
+        "UPDATE ride_requests SET status='accepted', driver_id=?, accepted_at=? "
+        "WHERE id=? AND status='open' AND vehicle_type IN ('any', ?)",
+        (g.user["id"], ts(), rid, d["vehicle_type"]),
     )
     if cur.rowcount == 0:
         db.rollback()
+        other = db.execute("SELECT vehicle_type FROM ride_requests WHERE id=? AND status='open'", (rid,)).fetchone()
+        if other:
+            return err(f"Cette demande est réservée aux chauffeurs de type « {VEHICLE_TYPES.get(other['vehicle_type'], '')} ».", 403)
         return err("Cette demande a déjà été prise ou a expiré.", 409)
     db.execute("UPDATE drivers SET availability='busy' WHERE user_id=?", (g.user["id"],))
     db.commit()
@@ -926,6 +1068,7 @@ def admin_stats():
         "rides_completed": one("SELECT COUNT(*) FROM ride_requests WHERE status='completed'"),
         "reports_open": one("SELECT COUNT(*) FROM reports WHERE status='open'"),
         "messages_unread": one("SELECT COUNT(*) FROM messages WHERE sender='user' AND read_at IS NULL"),
+        "password_resets_open": one("SELECT COUNT(*) FROM password_resets WHERE status='open'"),
     })
 
 
@@ -935,7 +1078,7 @@ def admin_drivers():
     status = request.args.get("approval", "pending")
     if status not in ("pending", "approved", "rejected", "all"):
         status = "pending"
-    q = """SELECT u.id, u.name, u.phone, u.is_blocked, u.created_at, d.plate, d.moto_model, d.permis,
+    q = """SELECT u.id, u.name, u.phone, u.is_blocked, u.created_at, d.plate, d.vehicle_type, d.moto_model, d.permis,
                   d.commune, d.whatsapp, d.approval, d.approval_note, d.availability
            FROM drivers d JOIN users u ON u.id=d.user_id"""
     params = ()
@@ -1106,7 +1249,7 @@ def validate_backup(db, data):
 
 def restore_all(db, data):
     """Remplace TOUT le contenu par celui de la sauvegarde, dans une seule transaction (l'appelant valide ou annule)."""
-    for table in ["tokens"] + [t for t, _ in BACKUP_TABLES][::-1]:
+    for table in ["tokens", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
         db.execute(f"DELETE FROM {table}")
     for table, _order in BACKUP_TABLES:
         groups = {}

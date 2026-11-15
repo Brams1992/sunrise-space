@@ -41,6 +41,12 @@ const fmtPhone = (p) => String(p || '').replace(/(\d{2})(?=\d)/g, '$1 ').trim();
 const fmtDist = (km) => (km < 1 ? `${Math.round(km * 1000 / 10) * 10} m` : `${km.toFixed(1).replace('.', ',')} km`);
 const ago = (m) => (m == null ? '' : m < 1 ? "à l'instant" : m < 60 ? `il y a ${m} min` : `il y a ${Math.floor(m / 60)} h`);
 const waLink = (num, text) => `https://wa.me/225${encodeURIComponent(num)}?text=${encodeURIComponent(text || "Bonjour, je vous contacte depuis Sunrise Space. Êtes-vous disponible pour une course ?")}`;
+const VEHICLES = {
+  moto: { icon: '🏍️', label: 'Moto-taxi', short: 'Moto' },
+  voiture: { icon: '🚕', label: 'Taxi (voiture)', short: 'Voiture' },
+  tricycle: { icon: '🛺', label: 'Tricycle', short: 'Tricycle' },
+};
+const veh = (t) => VEHICLES[t] || VEHICLES.moto;
 const mapsLink = (lat, lng) => `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
 
 async function api(path, opts = {}) {
@@ -234,6 +240,7 @@ function render() {
   state.lastUnread = null; state.unread = 0;
   state.tab = null;
   if (!state.user) return renderAuth();
+  if (state.user.must_change_password) return renderForcedChange();
   if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
@@ -307,7 +314,7 @@ function renderAuth() {
       <section class="hero">
         <img src="/icon-192.png" alt="Logo Sunrise Space">
         <h1>Sunrise Space</h1>
-        <p>Trouvez un moto-taxi près de vous, en un instant.</p>
+        <p>Trouvez une moto, un taxi ou un tricycle près de vous, en un instant.</p>
       </section>
       <section class="card auth-card">
         <div class="seg" role="group" aria-label="Mode">
@@ -324,10 +331,12 @@ function renderAuth() {
           <label id="f-name" hidden>Nom complet<input name="name" autocomplete="name" maxlength="60" placeholder="Ex. Awa Koné"></label>
           <label>Numéro de téléphone<input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="07 07 07 07 07" maxlength="18" required></label>
           <label>Mot de passe<input name="password" type="password" autocomplete="current-password" minlength="6" placeholder="Au moins 6 caractères" required></label>
+          <button type="button" class="link" id="forgot">Mot de passe oublié ?</button>
           <div id="driver-box" class="stack" hidden>
+            <label>Votre véhicule<select name="vehicle_type">${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}">${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
             <label>Plaque d'immatriculation<input name="plate" maxlength="20" placeholder="Ex. 1234 AB 01"></label>
             <label>Numéro de permis de conduire<input name="permis" maxlength="30"></label>
-            <label>Modèle de la moto <span class="hint">(facultatif)</span><input name="moto_model" maxlength="40" placeholder="Ex. Jakarta 125"></label>
+            <label>Modèle du véhicule <span class="hint">(facultatif)</span><input name="moto_model" maxlength="40" placeholder="Ex. Jakarta 125, Toyota Corolla…"></label>
             <label>Commune / ville<select name="commune"><option value="">Choisir…</option>${communes}</select></label>
             <label>Numéro WhatsApp <span class="hint">(si différent du téléphone)</span><input name="whatsapp" type="tel" inputmode="numeric" maxlength="18"></label>
             <p class="banner warn">Votre profil sera vérifié par l'équipe Sunrise Space (plaque, permis) avant d'apparaître aux clients.</p>
@@ -337,7 +346,7 @@ function renderAuth() {
         </form>
       </section>
       <section class="feat">
-        <div><span class="ic">📍</span><p><b>Motos disponibles autour de vous</b><br><span class="muted">Voyez les chauffeurs les plus proches en direct.</span></p></div>
+        <div><span class="ic">📍</span><p><b>Chauffeurs disponibles autour de vous</b><br><span class="muted">Moto, taxi ou tricycle : voyez les plus proches en direct.</span></p></div>
         <div><span class="ic">📞</span><p><b>Appel ou WhatsApp direct</b><br><span class="muted">Vous vous arrangez avec le chauffeur, paiement en espèces.</span></p></div>
         <div><span class="ic">🛡️</span><p><b>Chauffeurs vérifiés</b><br><span class="muted">Chaque profil est contrôlé, et vous pouvez signaler un abus.</span></p></div>
         ${installButtonHTML()}
@@ -353,11 +362,13 @@ function renderAuth() {
     $('#f-name').hidden = !reg;
     $('#driver-box').hidden = !(reg && role === 'driver');
     $('#auth-submit').textContent = reg ? 'Créer mon compte' : 'Se connecter';
+    $('#forgot').hidden = reg;
     form.password.autocomplete = reg ? 'new-password' : 'current-password';
     err.hidden = true;
   };
   $$('[data-mode]').forEach((b) => (b.onclick = () => { mode = b.dataset.mode; sync(); }));
   $$('[data-role]').forEach((b) => (b.onclick = () => { role = b.dataset.role; sync(); }));
+  $('#forgot').onclick = () => openForgot(form.phone.value);
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
@@ -370,7 +381,7 @@ function renderAuth() {
         data = await api('/api/auth/login', { method: 'POST', body: { phone: form.phone.value, password: form.password.value } });
       } else {
         const body = { role, name: form.name.value, phone: form.phone.value, password: form.password.value };
-        if (role === 'driver') body.driver = { plate: form.plate.value, permis: form.permis.value, moto_model: form.moto_model.value, commune: form.commune.value, whatsapp: form.whatsapp.value };
+        if (role === 'driver') body.driver = { vehicle_type: form.vehicle_type.value, plate: form.plate.value, permis: form.permis.value, moto_model: form.moto_model.value, commune: form.commune.value, whatsapp: form.whatsapp.value };
         data = await api('/api/auth/register', { method: 'POST', body });
       }
       state.token = data.token;
@@ -382,6 +393,81 @@ function renderAuth() {
       err.textContent = e.message; err.hidden = false;
     } finally { btn.disabled = false; }
   };
+}
+
+function openForgot(prefill) {
+  const m = modal(`<h2>Mot de passe oublié</h2>
+    <p class="muted">Entrez le numéro de votre compte. L'équipe Sunrise Space vérifie votre identité puis vous contacte (appel ou WhatsApp) pour vous remettre un mot de passe provisoire.</p>
+    <form id="fgf" class="form" novalidate>
+      <label>Numéro de téléphone<input name="phone" type="tel" inputmode="numeric" autocomplete="tel" maxlength="18" placeholder="07 07 07 07 07" value="${esc(prefill || '')}" required></label>
+      <p class="banner bad" id="fg-err" role="alert" hidden></p>
+      <div class="row"><button type="button" class="btn btn-ghost grow" id="fg-cancel">Annuler</button><button class="btn grow" type="submit" id="fg-ok">Envoyer la demande</button></div>
+    </form>`);
+  $('#fg-cancel', m.el).onclick = () => m.close();
+  $('#fgf', m.el).onsubmit = async (ev) => {
+    ev.preventDefault();
+    const err = $('#fg-err', m.el), btn = $('#fg-ok', m.el);
+    err.hidden = true; btn.disabled = true;
+    try {
+      await api('/api/auth/forgot', { method: 'POST', body: { phone: ev.target.phone.value } });
+      m.el.innerHTML = `<h2>Demande envoyée ✅</h2>
+        <p>Si ce numéro correspond à un compte, l'équipe Sunrise Space a été prévenue. Elle vous contactera avec un <b>mot de passe provisoire</b> que vous changerez dès votre connexion.</p>
+        <p class="muted">Gardez votre téléphone à portée. Pas besoin de refaire une demande.</p>
+        <button class="btn btn-block" id="fg-done">OK</button>`;
+      $('#fg-done', m.el).onclick = () => m.close();
+    } catch (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; }
+  };
+}
+
+function passwordFormHTML(currentLabel) {
+  return `<label>${currentLabel}<input name="cur" type="password" autocomplete="current-password" required></label>
+    <label>Nouveau mot de passe<input name="new" type="password" autocomplete="new-password" minlength="6" placeholder="Au moins 6 caractères" required></label>
+    <label>Répétez le nouveau mot de passe<input name="new2" type="password" autocomplete="new-password" required></label>
+    <p class="banner bad" id="pw-err" role="alert" hidden></p>`;
+}
+
+function bindPasswordForm(form, btn, done) {
+  const err = $('#pw-err', form);
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    err.hidden = true;
+    if (form.new.value !== form.new2.value) { err.textContent = 'Les deux mots de passe ne sont pas identiques.'; err.hidden = false; return; }
+    btn.disabled = true;
+    try {
+      const r = await api('/api/auth/change-password', { method: 'POST', body: { current: form.cur.value, new: form.new.value } });
+      done(r.user);
+    } catch (e) { err.textContent = e.message; err.hidden = false; btn.disabled = false; }
+  };
+}
+
+function openChangePassword() {
+  const m = modal(`<h2>Changer mon mot de passe</h2>
+    <form id="pwf" class="form" novalidate>${passwordFormHTML('Mot de passe actuel')}
+      <p class="muted tiny">Vos autres appareils seront déconnectés.</p>
+      <div class="row"><button type="button" class="btn btn-ghost grow" id="pw-cancel">Annuler</button><button class="btn grow" type="submit" id="pw-ok">Enregistrer</button></div>
+    </form>`);
+  $('#pw-cancel', m.el).onclick = () => m.close();
+  bindPasswordForm($('#pwf', m.el), $('#pw-ok', m.el), (user) => { m.close(); state.user = user; toast('Mot de passe modifié.'); });
+}
+
+/* Après une réinitialisation par l'équipe : on doit choisir son propre mot de passe avant de continuer. */
+function renderForcedChange() {
+  $('#app').innerHTML = `
+    <div class="shell">
+      <section class="hero">
+        <img src="/icon-192.png" alt="Logo Sunrise Space">
+        <h1>Choisissez votre mot de passe</h1>
+        <p>Vous êtes connecté avec un mot de passe provisoire. Choisissez maintenant le vôtre.</p>
+      </section>
+      <section class="card auth-card">
+        <form class="form" id="pwf" novalidate>${passwordFormHTML('Mot de passe provisoire (reçu de l\'équipe)')}
+          <button class="btn btn-block" type="submit" id="pw-ok">Enregistrer et continuer</button>
+          <button class="link" type="button" id="pw-out">Me déconnecter</button>
+        </form>
+      </section>
+    </div>`;
+  bindPasswordForm($('#pwf'), $('#pw-ok'), (user) => { state.user = user; render(); toast('Mot de passe modifié. Bienvenue !'); });
+  $('#pw-out').onclick = logout;
 }
 
 async function logout() {
@@ -401,15 +487,17 @@ function accountView() {
       <h2>Mon compte</h2>
       <dl class="kv"><dt>Nom</dt><dd>${esc(u.name)}</dd><dt>Téléphone</dt><dd>${esc(fmtPhone(u.phone))}</dd>
         <dt>Profil</dt><dd>${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur' }[u.role]}</dd>
-        ${d ? `<dt>Moto</dt><dd>${esc(d.moto_model || '—')} · ${esc(d.plate)}</dd><dt>Commune</dt><dd>${esc(d.commune)}</dd>
+        ${d ? `<dt>Véhicule</dt><dd>${veh(d.vehicle_type).icon} ${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</dd><dt>Commune</dt><dd>${esc(d.commune)}</dd>
         <dt>Validation</dt><dd>${{ pending: 'En attente', approved: 'Validé ✅', rejected: 'Refusé' }[d.approval]}</dd>` : ''}
       </dl>
       ${installButtonHTML()}
+      <button class="btn btn-ghost btn-block" id="btn-pw">🔒 Changer mon mot de passe</button>
       <button class="btn btn-dark btn-block" id="btn-logout">Se déconnecter</button>
     </section>
     <section class="card flat"><h3>À propos</h3>
-      <p class="muted">Sunrise Space met en relation clients et chauffeurs de moto-taxi partout en Côte d'Ivoire. Le prix de la course se discute directement avec le chauffeur et se règle en espèces.</p>
+      <p class="muted">Sunrise Space met en relation clients et chauffeurs (moto-taxi, taxi, tricycle) partout en Côte d'Ivoire. Le prix de la course se discute directement avec le chauffeur et se règle en espèces.</p>
     </section>`;
+  $('#btn-pw').onclick = openChangePassword;
   $('#btn-logout').onclick = logout;
 }
 
@@ -437,30 +525,36 @@ function openReport(targetId, targetName, requestId) {
 async function clientNearby() {
   $('#main').innerHTML = `
     <section class="card">${posControlsHTML()}</section>
-    <div id="map" class="map" aria-label="Carte des motos disponibles"></div>
-    <div class="section-head"><h2>Motos disponibles</h2><button class="link" id="btn-refresh">Actualiser</button></div>
+    <div id="map" class="map" aria-label="Carte des véhicules disponibles"></div>
+    <div class="section-head"><h2>Chauffeurs disponibles</h2><button class="link" id="btn-refresh">Actualiser</button></div>
+    <div id="vf"></div>
     <div id="drivers" class="list"></div>`;
   bindPosControls();
   setupMap('map');
-  let first = true;
+  let first = true, vf = state.wantType || '', lastList = [];
 
   async function load() {
     const box = $('#drivers');
     if (!box) return;
-    if (!state.pos) { box.innerHTML = empty('📍', 'Indiquez votre position', 'Touchez « Me localiser » ou choisissez votre commune pour voir les motos autour de vous.'); return; }
+    if (!state.pos) { box.innerHTML = empty('📍', 'Indiquez votre position', 'Touchez « Me localiser » ou choisissez votre commune pour voir les chauffeurs autour de vous.'); return; }
     try {
       const r = await api(`/api/drivers/nearby?lat=${state.pos.lat}&lng=${state.pos.lng}`);
       paint(r.drivers);
     } catch (e) { if (e.status !== 401) box.innerHTML = empty('⚠️', 'Chargement impossible', e.message); }
   }
 
-  function paint(list) {
+  function paint(all) {
+    lastList = all;
     const box = $('#drivers');
+    const count = (t) => all.filter((d) => d.vehicle_type === t).length;
+    $('#vf').innerHTML = filterTabs([['', `Tous (${all.length})`], ...Object.entries(VEHICLES).map(([k, v]) => [k, `${v.icon} ${v.short} (${count(k)})`])], vf, 'v');
+    $$('#vf [data-v]').forEach((b) => (b.onclick = () => { vf = b.dataset.v; state.wantType = vf; first = true; paint(lastList); }));
+    const list = vf ? all.filter((d) => d.vehicle_type === vf) : all;
     if (state.layers) {
       state.layers.clearLayers();
       list.forEach((d) => {
-        L.marker([d.lat, d.lng], { icon: L.divIcon({ className: 'pin', html: '🏍️', iconSize: [34, 34], iconAnchor: [17, 17] }) })
-          .bindPopup(`<b>${esc(d.name)}</b><br>${esc(d.plate)} · ${fmtDist(d.distance_km)}`).addTo(state.layers);
+        L.marker([d.lat, d.lng], { icon: L.divIcon({ className: 'pin', html: veh(d.vehicle_type).icon, iconSize: [34, 34], iconAnchor: [17, 17] }) })
+          .bindPopup(`<b>${esc(d.name)}</b><br>${esc(veh(d.vehicle_type).label)} · ${esc(d.plate)} · ${fmtDist(d.distance_km)}`).addTo(state.layers);
       });
       if (first && list.length && state.pos) {
         state.map.fitBounds([[state.pos.lat, state.pos.lng], ...list.map((d) => [d.lat, d.lng])], { padding: [30, 30], maxZoom: 16 });
@@ -468,17 +562,18 @@ async function clientNearby() {
     }
     first = false;
     if (!list.length) {
-      box.innerHTML = empty('🌅', 'Aucune moto disponible pour le moment', "Aucun chauffeur disponible dans 15 km. Faites une demande : les chauffeurs proches seront prévenus.") +
-        '<button class="btn btn-block" id="go-request">🛵 Faire une demande de moto</button>';
+      box.innerHTML = empty('🌅', vf ? `Aucun ${veh(vf).label.toLowerCase()} disponible pour le moment` : 'Aucun chauffeur disponible pour le moment',
+        vf && all.length ? 'Essayez un autre type de véhicule, ou faites une demande.' : "Aucun chauffeur disponible dans 15 km. Faites une demande : les chauffeurs proches seront prévenus.") +
+        '<button class="btn btn-block" id="go-request">🛵 Faire une demande</button>';
       $('#go-request').onclick = () => openTab('client', 'request');
       return;
     }
     box.innerHTML = list.map((d) => `
       <article class="card driver">
-        <div class="avatar" aria-hidden="true">🏍️</div>
+        <div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div>
         <div class="grow">
           <h3>${esc(d.name)}</h3>
-          <p class="muted">${esc(d.moto_model || 'Moto')} · ${esc(d.plate)}</p>
+          <p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p>
           <p class="meta"><span class="chip ok">● Disponible</span><b>${fmtDist(d.distance_km)}</b><span class="muted">· ${esc(d.commune)}</span></p>
           <p class="tiny muted">Position ${esc(ago(d.updated_min_ago))}</p>
         </div>
@@ -515,14 +610,16 @@ async function clientRequest() {
 
   function formHTML() {
     return `<section class="card stack">
-      <h2>Demander une moto</h2>
+      <h2>Demander un chauffeur</h2>
       <p class="muted">Votre position est détectée automatiquement. Indiquez seulement où vous allez.</p>
       <div class="posline" id="posline">${freshGps() ? posLineHTML() : '<span class="chip">📡 Détection de votre position…</span>'}</div>
       <button type="button" class="link" id="btn-redetect" style="justify-self:start">↻ Actualiser ma position</button>
       <form id="reqform" class="form" style="margin-top:0">
         <label>Où allez-vous ?<input name="dest" required maxlength="120" autocomplete="off" placeholder="Ex. Marché de Cocody"></label>
+        <label>Quel véhicule ?<select name="vtype" id="vtype"><option value="any">Peu importe (le plus proche)</option>${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}"${state.wantType === k ? ' selected' : ''}>${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
+        <p class="tiny muted" id="vhint"></p>
         <p class="banner bad" id="req-err" role="alert" hidden></p>
-        <button class="btn btn-block" type="submit">🛵 Demander une moto</button>
+        <button class="btn btn-block" type="submit">🛵 Demander un chauffeur</button>
       </form></section>`;
   }
 
@@ -537,12 +634,32 @@ async function clientRequest() {
     }
   }
 
+  /* Indique, à côté de chaque type, combien de chauffeurs sont disponibles près du client. */
+  async function fillVehicleCounts() {
+    const sel = $('#vtype'), hint = $('#vhint');
+    if (!sel || !state.pos) return;
+    try {
+      const { drivers } = await api(`/api/drivers/nearby?lat=${state.pos.lat}&lng=${state.pos.lng}`);
+      const n = (t) => drivers.filter((d) => d.vehicle_type === t).length;
+      Array.from(sel.options).forEach((o) => {
+        const count = o.value === 'any' ? drivers.length : n(o.value);
+        const base = o.value === 'any' ? 'Peu importe (le plus proche)' : `${veh(o.value).icon} ${veh(o.value).label}`;
+        o.textContent = `${base} · ${count} disponible${count > 1 ? 's' : ''}`;
+      });
+      const show = () => {
+        const c = sel.value === 'any' ? drivers.length : n(sel.value);
+        hint.textContent = c ? '' : 'Aucun chauffeur de ce type n\'est disponible près de vous pour le moment. Vous pouvez quand même envoyer la demande : elle reste ouverte 30 minutes.';
+      };
+      sel.onchange = show; show();
+    } catch { /* l'indication est facultative */ }
+  }
+
   function driverBlock(d) {
     return `<div class="card flat">
-      <div class="row"><div class="avatar" aria-hidden="true">🏍️</div><div class="grow"><h3>${esc(d.name)}</h3><p class="muted">${esc(d.moto_model || 'Moto')} · ${esc(d.plate)}</p></div></div>
+      <div class="row"><div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div><div class="grow"><h3>${esc(d.name)}</h3><p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p></div></div>
       <div class="row" style="margin-top:10px">
         <a class="btn btn-sm grow" href="tel:+225${esc(d.phone)}">📞 Appeler</a>
-        <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(d.whatsapp, 'Bonjour, j\'ai fait une demande de moto sur Sunrise Space.')}">WhatsApp</a>
+        <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(d.whatsapp, 'Bonjour, j\'ai fait une demande sur Sunrise Space.')}">WhatsApp</a>
       </div></div>`;
   }
 
@@ -560,10 +677,12 @@ async function clientRequest() {
       box.innerHTML = formHTML();
       $('#reqform').onsubmit = submit;
       $('#btn-redetect').onclick = detectPosition;
+      fillVehicleCounts();
       if (!freshGps()) detectPosition();
       return;
     }
-    const where = `<dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Ma position (GPS)')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>`;
+    const wantedLabel = r.vehicle_type && r.vehicle_type !== 'any' ? `${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).label)}` : 'Peu importe';
+    const where = `<dl class="kv"><dt>Véhicule</dt><dd>${wantedLabel}</dd><dt>Départ</dt><dd>${esc(r.pickup_text || 'Ma position (GPS)')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>`;
     if (r.status === 'open') {
       box.innerHTML = `<section class="card stack"><h2><span class="pulse"></span>Recherche d'un chauffeur…</h2>
         <p class="muted">Demande envoyée <span id="age">${esc(ago(r.age_min))}</span>. Elle expire au bout de 30 minutes.</p>${where}
@@ -606,7 +725,8 @@ async function clientRequest() {
       if (p.accuracy > 150 && !confirm(`Votre position est approximative (±${p.accuracy} m). Le chauffeur risque de ne pas vous trouver. Envoyer quand même ?`)) {
         throw new Error("Demande non envoyée. Sortez à l'air libre, touchez « Actualiser ma position », puis réessayez.");
       }
-      await api('/api/requests', { method: 'POST', body: { lat: p.lat, lng: p.lng, accuracy: p.accuracy, pickup_text: '', destination_text: dest, note: '' } });
+      await api('/api/requests', { method: 'POST', body: { lat: p.lat, lng: p.lng, accuracy: p.accuracy, pickup_text: '', destination_text: dest, note: '', vehicle_type: f.vtype.value } });
+      state.wantType = f.vtype.value === 'any' ? '' : f.vtype.value;
       toast('Demande envoyée !'); lastKey = null; load();
     } catch (e) { err.textContent = e.message; err.hidden = false; }
     finally { btn.disabled = false; btn.textContent = label; }
@@ -760,7 +880,7 @@ async function refreshJobRoute(force) {
   const me = myPos();
   if (!me) { setEta('En attente de votre position GPS…'); return; }
   if (jobMap.dm) jobMap.dm.setLatLng([me.lat, me.lng]);
-  else jobMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  else jobMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon(veh(state.driver && state.driver.vehicle_type).icon), zIndexOffset: 1000 }).addTo(map);
   if (distKm(me, job) * 1000 < 30) {  // déjà sur place : pas de ligne à tracer
     if (jobMap.line) { map.removeLayer(jobMap.line); jobMap.line = null; }
     setEta('📍 Vous êtes <b>au point de rendez-vous</b>');
@@ -793,7 +913,7 @@ function initReqMap(requests) {
     pts.push([r.lat, r.lng]);
   });
   const me = myPos();
-  if (me) { reqMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map); pts.push([me.lat, me.lng]); }
+  if (me) { reqMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon(veh(state.driver && state.driver.vehicle_type).icon), zIndexOffset: 1000 }).addTo(map); pts.push([me.lat, me.lng]); }
   map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 16 });
 }
 
@@ -845,10 +965,10 @@ async function updateClientMap(r, force) {
   if (cliMap.cm) cliMap.cm.setLatLng([dest.lat, dest.lng]);  // le client a pu bouger
   if (!window.L || !map) { setCEta(`Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`); return; }
   if (cliMap.dm) cliMap.dm.setLatLng([me.lat, me.lng]);
-  else cliMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon('🏍️'), zIndexOffset: 1000 }).addTo(map);
+  else cliMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon(veh(d.vehicle_type).icon), zIndexOffset: 1000 }).addTo(map);
   if (distKm(me, dest) * 1000 < 30) {  // le chauffeur est là : pas de ligne à tracer
     if (cliMap.line) { map.removeLayer(cliMap.line); cliMap.line = null; }
-    setCEta('🏍️ Le chauffeur est <b>tout près</b> de vous');
+    setCEta(`${veh(d.vehicle_type).icon} Le chauffeur est <b>tout près</b> de vous`);
     return;
   }
   const moved = cliMap.lastFrom ? distKm(cliMap.lastFrom, me) * 1000 : Infinity;
@@ -863,7 +983,7 @@ async function updateClientMap(r, force) {
   cliMap.line = L.polyline(pts, { color: '#FF7A1A', weight: 5, opacity: 0.9, dashArray: route ? null : '8 8' }).addTo(map);
   if (!cliMap.fitted) { cliMap.fitted = true; map.fitBounds(L.latLngBounds(pts).pad(0.2), { maxZoom: 17 }); }
   setCEta(route
-    ? `🏍️ Arrivée dans environ <b>${route.min} min</b> · à ${route.km.toFixed(1).replace('.', ',')} km`
+    ? `${veh(d.vehicle_type).icon} Arrivée dans environ <b>${route.min} min</b> · à ${route.km.toFixed(1).replace('.', ',')} km`
     : `Le chauffeur est à <b>${fmtDist(distKm(me, dest))}</b> (à vol d'oiseau)`);
 }
 
@@ -930,7 +1050,7 @@ async function driverHome() {
       if (d.availability !== 'available') html += empty('😴', 'Vous êtes indisponible', 'Passez « Disponible » pour recevoir les demandes des clients proches.');
       else if (!requests.length) html += empty('🌅', 'Aucune demande pour le moment', 'Restez disponible : les nouvelles demandes apparaissent ici automatiquement.');
       else html += '<div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
-          <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span></h3>
+          <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span>${r.vehicle_type && r.vehicle_type !== 'any' ? `<span class="chip">Demande : ${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).short)}</span>` : ''}</h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
           <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
           <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter la course</button></div></article>`).join('') + '</div>';
@@ -1084,6 +1204,7 @@ async function adminStats() {
         ${card(s.drivers_pending, 'Chauffeurs à valider', s.drivers_pending > 0)}
         ${card(s.reports_open, 'Signalements ouverts', s.reports_open > 0)}
         ${card(s.messages_unread, 'Messages non lus', s.messages_unread > 0)}
+        ${card(s.password_resets_open, 'Mots de passe oubliés', s.password_resets_open > 0)}
         ${card(s.requests_open, 'Demandes en attente')}
         ${card(s.clients, 'Clients inscrits')}
         ${card(s.drivers, 'Chauffeurs inscrits')}
@@ -1105,7 +1226,7 @@ async function adminDrivers() {
       const ap = { pending: ['À valider', 'warn'], approved: ['Validé', 'ok'], rejected: ['Refusé', 'bad'] };
       $('#dl').innerHTML = drivers.length ? drivers.map((d) => `<article class="card item">
         <h3>${esc(d.name)} <span class="chip ${ap[d.approval][1]}">${ap[d.approval][0]}</span>${d.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</h3>
-        <dl class="kv"><dt>Téléphone</dt><dd>${esc(fmtPhone(d.phone))}</dd><dt>Moto</dt><dd>${esc(d.moto_model || '—')} · ${esc(d.plate)}</dd>
+        <dl class="kv"><dt>Téléphone</dt><dd>${esc(fmtPhone(d.phone))}</dd><dt>Véhicule</dt><dd>${veh(d.vehicle_type).icon} ${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</dd>
         <dt>Permis</dt><dd>${esc(d.permis)}</dd><dt>Commune</dt><dd>${esc(d.commune)}</dd></dl>
         <div class="actions">
           ${d.approval !== 'approved' ? `<button class="btn btn-ok btn-sm" data-ap="approved" data-id="${d.id}">✅ Valider</button>` : ''}
@@ -1126,12 +1247,49 @@ async function adminDrivers() {
   await load();
 }
 
+function showTempPassword(r) {
+  const msg = `Bonjour ${r.name}, voici votre mot de passe provisoire Sunrise Space : ${r.temp_password}\nConnectez-vous avec votre numéro, puis choisissez votre propre mot de passe.`;
+  const m = modal(`<h2>Mot de passe provisoire</h2>
+    <p>Pour <b>${esc(r.name)}</b> · ${esc(fmtPhone(r.phone))}</p>
+    <div class="tempcode" id="tp">${esc(r.temp_password)}</div>
+    <p class="muted">Il ne sera <b>plus affiché</b> après cette fenêtre. La personne devra en choisir un nouveau dès sa connexion.</p>
+    <a class="btn btn-wa btn-block" target="_blank" rel="noopener" href="${waLink(r.phone, msg)}">Envoyer par WhatsApp</a>
+    <button class="btn btn-ghost btn-block" id="tp-copy">Copier le message</button>
+    <button class="btn btn-block" id="tp-ok">Terminé</button>`);
+  $('#tp-copy', m.el).onclick = async () => { try { await navigator.clipboard.writeText(msg); toast('Message copié'); } catch { toast('Copie impossible : notez le code.', 'bad'); } };
+  $('#tp-ok', m.el).onclick = () => m.close();
+}
+
 async function adminUsers() {
   let role = '', q = '';
-  $('#main').innerHTML = `<h2>Utilisateurs</h2>
+  $('#main').innerHTML = `<div id="pwr"></div><h2>Utilisateurs</h2>
     <div class="row"><input id="uq" type="search" placeholder="Rechercher un nom ou un numéro…" style="flex:1" aria-label="Rechercher"></div>
     <div id="ft"></div><div id="ul" class="list cols"></div>`;
+  async function loadResets() {
+    try {
+      const { requests } = await api('/api/admin/password-resets');
+      $('#pwr').innerHTML = requests.length ? `<section class="card stack"><h3>🔑 Mots de passe oubliés (${requests.length})</h3>
+        <p class="muted">Avant de donner un mot de passe provisoire, vérifiez que c'est bien la personne : rappelez-la sur le numéro du compte.</p>
+        ${requests.map((r) => `<article class="card flat"><p><b>${esc(r.name)}</b> <span class="chip">${r.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${r.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</p>
+          <p class="muted">${esc(fmtPhone(r.phone))} · demandé ${fmtWhen(r.created_at)}</p>
+          <div class="actions"><button class="btn btn-sm" data-pw="reset" data-id="${r.id}">Donner un mot de passe provisoire</button><button class="btn btn-sm btn-ghost" data-pw="dismiss" data-id="${r.id}">Ignorer</button></div></article>`).join('')}</section>` : '';
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  $('#pwr').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-pw]');
+    if (!b) return;
+    const reset = b.dataset.pw === 'reset';
+    if (reset && !confirm("Avez-vous vérifié l'identité de cette personne ? Son ancien mot de passe ne marchera plus et elle sera déconnectée.")) return;
+    b.disabled = true;
+    try {
+      const r = await api(`/api/admin/password-resets/${b.dataset.id}`, { method: 'POST', body: { action: b.dataset.pw } });
+      if (reset) showTempPassword(r);
+      else toast('Demande ignorée');
+      loadResets();
+    } catch (err) { toast(err.message, 'bad'); b.disabled = false; loadResets(); }
+  });
   async function load() {
+    loadResets();
     $('#ft').innerHTML = filterTabs([['', 'Tous'], ['client', 'Clients'], ['driver', 'Chauffeurs']], role, 'r');
     $$('#ft [data-r]').forEach((b) => (b.onclick = () => { role = b.dataset.r; load(); }));
     try {
