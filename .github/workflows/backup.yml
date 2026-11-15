@@ -2,8 +2,8 @@ name: Sauvegarde quotidienne de la base
 
 on:
   schedule:
-    - cron: "17 3 * * *"      # tous les jours vers 03h17 (heure d'Abidjan = UTC)
-  workflow_dispatch:           # bouton « Run workflow » pour la lancer à la main
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -26,6 +26,16 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           test -n "$DATABASE_URL" || { echo "Le secret DATABASE_URL est manquant."; exit 1; }
+          DATABASE_URL="$(python - <<'PY'
+          import os, socket
+          from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+          p = urlsplit(os.environ["DATABASE_URL"].strip())
+          ip = socket.getaddrinfo(p.hostname, p.port or 5432, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+          q = dict(parse_qsl(p.query)); q["hostaddr"] = ip
+          print(urlunsplit((p.scheme, p.netloc, p.path, urlencode(q), p.fragment)))
+          PY
+          )"
+          export DATABASE_URL
           python backup_db.py sunrise-backup.json.gz
 
       - name: Chiffrer (les données personnelles ne doivent jamais être lisibles)
