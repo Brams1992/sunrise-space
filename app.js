@@ -978,28 +978,103 @@ function filterTabs(items, current, attr) {
   return `<div class="tabs">${items.map(([v, l]) => `<button data-${attr}="${v}" aria-pressed="${v === current}">${esc(l)}</button>`).join('')}</div>`;
 }
 
+async function saveBackupFile(prefix) {
+  const res = await fetch('/api/admin/backup', { headers: { Authorization: 'Bearer ' + state.token } });
+  if (!res.ok) throw new Error('Sauvegarde impossible pour le moment.');
+  const blob = await res.blob();
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${prefix}-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
 async function downloadBackup(btn) {
   btn.disabled = true;
   try {
-    const res = await fetch('/api/admin/backup', { headers: { Authorization: 'Bearer ' + state.token } });
-    if (!res.ok) throw new Error('Sauvegarde impossible pour le moment.');
-    const blob = await res.blob();
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `sunrise-sauvegarde-${new Date().toISOString().slice(0, 10)}.json`;
-    document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    await saveBackupFile('sunrise-sauvegarde');
     toast('Sauvegarde téléchargée. Gardez ce fichier en lieu sûr.');
   } catch (e) { toast(e.message, 'bad'); }
   finally { btn.disabled = false; }
+}
+
+const RESTORE_LABELS = { users: 'Comptes', drivers: 'Profils chauffeurs', ride_requests: 'Courses', reports: 'Signalements', announcements: 'Annonces', messages: 'Messages' };
+
+async function pickRestoreFile(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (file.size > 25 * 1024 * 1024) return toast('Fichier trop volumineux.', 'bad');
+  let backup;
+  try { backup = JSON.parse(await file.text()); }
+  catch { return toast("Ce fichier n'est pas une sauvegarde lisible (il doit se terminer par .json).", 'bad'); }
+  let info;
+  try { info = await api('/api/admin/restore', { method: 'POST', body: { backup } }); }
+  catch (e) { return toast(e.message, 'bad'); }
+  confirmRestore(backup, info);
+}
+
+function confirmRestore(backup, info) {
+  const rows = Object.keys(RESTORE_LABELS).map((t) =>
+    `<tr><td>${RESTORE_LABELS[t]}</td><td>${info.backup[t] ?? 0}</td><td>${info.current[t] ?? 0}</td></tr>`).join('');
+  const when = info.created_at ? esc(String(info.created_at).replace('T', ' ').slice(0, 16)) + ' (UTC)' : 'date inconnue';
+  const phones = (info.admin_phones || []).map((p) => esc(fmtPhone(p))).join(', ');
+  const m = modal(`<h2>Restaurer cette sauvegarde ?</h2>
+    <p class="muted">Sauvegarde du <b>${when}</b>.</p>
+    <table class="rtable"><thead><tr><th></th><th>Dans le fichier</th><th>Actuellement</th></tr></thead><tbody>${rows}</tbody></table>
+    <div class="warnbox"><b>Tout le contenu actuel sera remplacé</b> par celui du fichier. Ce qui a été fait après la date de la sauvegarde sera perdu, et tout le monde sera déconnecté.
+      Pour vous reconnecter, utilisez le compte administrateur de la sauvegarde (téléphone : <b>${phones}</b>) avec le mot de passe qu'il avait à cette date.</div>
+    <button class="btn btn-ghost btn-block" id="rs-safe">1. Télécharger d'abord une copie de sécurité de l'état actuel</button>
+    <label class="muted" for="rs-word">2. Tapez RESTAURER en majuscules pour confirmer</label>
+    <input id="rs-word" autocomplete="off" autocapitalize="characters" placeholder="RESTAURER" disabled>
+    <div class="row"><button class="btn btn-ghost grow" id="rs-cancel">Annuler</button><button class="btn btn-danger grow" id="rs-go" disabled>Restaurer</button></div>`);
+  let saved = false;
+  const refresh = () => { $('#rs-go', m.el).disabled = !(saved && $('#rs-word', m.el).value === 'RESTAURER'); };
+  $('#rs-cancel', m.el).onclick = () => m.close();
+  $('#rs-word', m.el).oninput = refresh;
+  $('#rs-safe', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await saveBackupFile('sunrise-avant-restauration');
+      saved = true;
+      btn.textContent = '✓ Copie de sécurité téléchargée (vérifiez qu’elle est bien dans vos fichiers)';
+      $('#rs-word', m.el).disabled = false;
+      refresh();
+    } catch (err) { toast(err.message, 'bad'); btn.disabled = false; }
+  };
+  $('#rs-go', m.el).onclick = async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true; btn.textContent = 'Restauration…';
+    try {
+      await api('/api/admin/restore', { method: 'POST', body: { backup, dry_run: false, confirmation: $('#rs-word', m.el).value } });
+    } catch (err) {
+      if (err.status === 401) return;   // session déjà perdue : l'application affiche la connexion
+      toast(err.message, 'bad'); btn.disabled = false; btn.textContent = 'Restaurer';
+      return;
+    }
+    m.close();
+    clearInterval(state.unreadTimer);
+    localStorage.removeItem('ss_token');
+    stopLocSharing();
+    state.token = null; state.user = null; state.driver = null; state.pos = null;
+    render();
+    toast('Restauration terminée. Reconnectez-vous.');
+  };
 }
 
 async function adminStats() {
   $('#main').innerHTML = `<div id="st" class="stack"></div>
     <section class="card stack"><h3>💾 Sauvegarde</h3>
       <p class="muted">Téléchargez une copie de toutes les données (comptes, courses, messages…). Ce fichier contient des informations personnelles : gardez-le privé.</p>
-      <button class="btn btn-ghost btn-block" id="bk">Télécharger une sauvegarde</button></section>`;
+      <button class="btn btn-ghost btn-block" id="bk">Télécharger une sauvegarde</button>
+      <p class="muted">Pour revenir à une ancienne sauvegarde, choisissez le fichier .json téléchargé ici. Un aperçu s'affiche d'abord, rien n'est modifié avant votre confirmation.</p>
+      <button class="btn btn-ghost btn-block" id="rs">Restaurer depuis un fichier</button>
+      <input type="file" id="rsfile" accept=".json,application/json" hidden></section>`;
   $('#bk').onclick = (e) => downloadBackup(e.currentTarget);
+  $('#rs').onclick = () => $('#rsfile').click();
+  $('#rsfile').onchange = (e) => pickRestoreFile(e.currentTarget);
   async function load() {
     try {
       const s = await api('/api/admin/stats');

@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, Response, g, jsonify, request, send_from_directory
+from flask import Flask, Request, Response, g, jsonify, request, send_from_directory
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -53,7 +53,24 @@ REPORT_REASONS = {
     "autre": "Autre",
 }
 
+RESTORE_PATH = "/api/admin/restore"
+RESTORE_MAX_BYTES = 25 * 1024 * 1024   # taille maximale d'un fichier de sauvegarde envoyé pour restauration
+
+
+class AppRequest(Request):
+    """Corps limité à 64 Ko partout, sauf pour l'envoi d'une sauvegarde (réservé à l'admin)."""
+
+    @property
+    def max_content_length(self):
+        return RESTORE_MAX_BYTES if self.path == RESTORE_PATH else 64 * 1024
+
+    @max_content_length.setter
+    def max_content_length(self, value):
+        pass
+
+
 app = Flask(__name__, static_folder=None)  # fichiers servis par la liste blanche ci-dessous
+app.request_class = AppRequest
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # corps de requête limité
 
 SCHEMA = """
@@ -170,6 +187,14 @@ class DB:
             cur.execute(_pg(sql), tuple(params))
             return cur
         return self.conn.execute(sql, tuple(params))
+
+    def executemany(self, sql, rows):
+        rows = [tuple(r) for r in rows]
+        if USE_PG:
+            cur = self.conn.cursor()
+            cur.executemany(_pg(sql), rows)
+            return cur
+        return self.conn.executemany(sql, rows)
 
     def insert(self, sql, params=()):
         """Exécute un INSERT dans une table à colonne id et renvoie l'id créé."""
@@ -1024,6 +1049,102 @@ def export_all(db):
     for table, order in BACKUP_TABLES:
         data["tables"][table] = [dict(r) for r in db.execute(f"SELECT * FROM {table} ORDER BY {order}").fetchall()]
     return data
+
+
+class BackupError(ValueError):
+    """Fichier de sauvegarde refusé (message lisible par l'administrateur)."""
+
+
+MAX_BACKUP_ROWS = 200_000
+SEQUENCE_TABLES = ("users", "ride_requests", "reports", "announcements", "messages")
+
+
+def table_columns(db, table):
+    cur = db.execute(f"SELECT * FROM {table} LIMIT 0")
+    return [getattr(d, "name", None) or d[0] for d in cur.description]
+
+
+def count_rows(db):
+    return {t: db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t, _ in BACKUP_TABLES}
+
+
+def validate_backup(db, data):
+    """Vérifie le fichier AVANT de toucher à la base. Renvoie un résumé ; lève BackupError sinon.
+    Les noms de colonnes sont comparés à ceux de la vraie table : rien d'inconnu n'atteint le SQL."""
+    if not isinstance(data, dict) or data.get("format") != "sunrise-backup-1" or not isinstance(data.get("tables"), dict):
+        raise BackupError("Ce fichier n'est pas une sauvegarde Sunrise Space.")
+    tables = data["tables"]
+    total = 0
+    for table, _order in BACKUP_TABLES:
+        rows = tables.get(table, [])
+        if not isinstance(rows, list):
+            raise BackupError(f"Sauvegarde abîmée (table « {table} »).")
+        known = set(table_columns(db, table))
+        total += len(rows)
+        for row in rows:
+            if not isinstance(row, dict) or not row:
+                raise BackupError(f"Sauvegarde abîmée (table « {table} »).")
+            unknown = set(row) - known
+            if unknown:
+                raise BackupError(f"Sauvegarde incompatible avec cette version de l'application (table « {table} »). "
+                                  "Elle vient sans doute d'une version plus récente.")
+            for v in row.values():
+                if v is not None and not isinstance(v, (str, int, float, bool)):
+                    raise BackupError(f"Sauvegarde abîmée (table « {table} »).")
+    if total > MAX_BACKUP_ROWS:
+        raise BackupError("Sauvegarde trop volumineuse pour être restaurée depuis l'application.")
+    admins = [u for u in tables.get("users", []) if u.get("role") == "admin" and not u.get("is_blocked") and u.get("password_hash")]
+    if not admins:
+        raise BackupError("Cette sauvegarde ne contient aucun compte administrateur actif : vous ne pourriez plus vous connecter.")
+    return {
+        "created_at": data.get("created_at"),
+        "backup": {t: len(tables.get(t, [])) for t, _ in BACKUP_TABLES},
+        "current": count_rows(db),
+        "admin_phones": [u.get("phone") for u in admins],
+    }
+
+
+def restore_all(db, data):
+    """Remplace TOUT le contenu par celui de la sauvegarde, dans une seule transaction (l'appelant valide ou annule)."""
+    for table in ["tokens"] + [t for t, _ in BACKUP_TABLES][::-1]:
+        db.execute(f"DELETE FROM {table}")
+    for table, _order in BACKUP_TABLES:
+        groups = {}
+        for row in data["tables"].get(table, []):
+            groups.setdefault(tuple(row), []).append([row[c] for c in row])
+        for cols, values in groups.items():
+            db.executemany(f"INSERT INTO {table}({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)})", values)
+    if USE_PG:   # remet les compteurs d'identifiants après les insertions avec id explicite
+        for table in SEQUENCE_TABLES:
+            db.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM {table}")
+
+
+@app.post(RESTORE_PATH)
+@auth_required("admin")
+def admin_restore():
+    """Étape 1 (dry_run, par défaut) : vérifie le fichier et renvoie un aperçu, sans rien modifier.
+    Étape 2 (dry_run=false + confirmation='RESTAURER') : remplace les données ; tout le monde doit se reconnecter."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("backup"), dict):
+        return err("Fichier de sauvegarde illisible.", 400)
+    db = get_db()
+    try:
+        summary = validate_backup(db, body["backup"])
+    except BackupError as e:
+        return err(str(e), 400)
+    if body.get("dry_run") is not False:
+        return jsonify({"ok": True, "dry_run": True, **summary})
+    if body.get("confirmation") != "RESTAURER":
+        return err("Tapez RESTAURER en majuscules pour confirmer.", 400)
+    try:
+        restore_all(db, body["backup"])
+        db.commit()
+    except Exception:
+        db.rollback()
+        app.logger.exception("Échec de la restauration")
+        return err("La restauration a échoué. Rien n'a été modifié.", 500)
+    print(f"Restauration effectuée par l'admin {g.user['id']} : {summary['backup']}")
+    return jsonify({"ok": True, "dry_run": False, **summary})
 
 
 @app.get("/api/admin/backup")

@@ -34,20 +34,14 @@ def main():
     sunrise.init_db(create_admin=False)
     db = sunrise.DB()
     try:
+        try:
+            sunrise.validate_backup(db, data)
+        except sunrise.BackupError as e:
+            raise SystemExit(str(e))
         existing = db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if existing and not force:
             raise SystemExit(f"La base contient déjà {existing} compte(s). Relancez avec --force pour l'écraser.")
-        if existing:
-            for table in ["tokens"] + ORDER[::-1]:
-                db.execute(f"DELETE FROM {table}")
-        for table in ORDER:
-            for row in data["tables"].get(table, []):
-                cols = list(row)
-                db.execute(f"INSERT INTO {table}({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)})",
-                           [row[c] for c in cols])
-        if sunrise.USE_PG:   # remet les compteurs d'identifiants après les insertions avec id explicite
-            for table in ("users", "ride_requests", "reports", "announcements", "messages"):
-                db.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM {table}")
+        sunrise.restore_all(db, data)
         db.commit()
     except BaseException:
         db.rollback()
