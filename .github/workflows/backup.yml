@@ -1,0 +1,45 @@
+name: Sauvegarde quotidienne de la base
+
+on:
+  schedule:
+    - cron: "17 3 * * *"      # tous les jours vers 03h17 (heure d'Abidjan = UTC)
+  workflow_dispatch:           # bouton « Run workflow » pour la lancer à la main
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: pip install "Flask>=3.0" "psycopg[binary]>=3.1"
+
+      - name: Sauvegarder la base
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          test -n "$DATABASE_URL" || { echo "Le secret DATABASE_URL est manquant."; exit 1; }
+          python backup_db.py sunrise-backup.json.gz
+
+      - name: Chiffrer (les données personnelles ne doivent jamais être lisibles)
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          test -n "$BACKUP_PASSPHRASE" || { echo "Le secret BACKUP_PASSPHRASE est manquant."; exit 1; }
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+              --symmetric --cipher-algo AES256 -o sunrise-backup.json.gz.gpg sunrise-backup.json.gz
+          rm -f sunrise-backup.json.gz
+
+      - name: Conserver la sauvegarde (90 jours)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunrise-backup-${{ github.run_id }}
+          path: sunrise-backup.json.gz.gpg
+          retention-days: 90
