@@ -1,0 +1,72 @@
+name: "Restaurer une sauvegarde (ATTENTION, remplace les données actuelles)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Numéro de l'exécution « Sauvegarde quotidienne » à restaurer (le nombre à la fin de son adresse)"
+        required: true
+      confirmation:
+        description: "Tapez RESTAURER en majuscules pour confirmer"
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vérifier la confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          [ "$CONFIRMATION" = "RESTAURER" ] || { echo "Confirmation incorrecte : tapez exactement RESTAURER."; exit 1; }
+          echo "$RUN_ID" | grep -Eq '^[0-9]+$' || { echo "Le numéro d'exécution doit contenir uniquement des chiffres."; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Installer les dépendances
+        run: pip install "Flask>=3.0" "psycopg[binary]>=3.1"
+
+      - name: Copie de sécurité de l'état ACTUEL (avant d'écraser)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          test -n "$DATABASE_URL" || { echo "Le secret DATABASE_URL est manquant."; exit 1; }
+          test -n "$BACKUP_PASSPHRASE" || { echo "Le secret BACKUP_PASSPHRASE est manquant."; exit 1; }
+          python backup_db.py avant-restauration.json.gz
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+              --symmetric --cipher-algo AES256 -o avant-restauration.json.gz.gpg avant-restauration.json.gz
+          rm -f avant-restauration.json.gz
+
+      - name: Conserver la copie de sécurité (30 jours)
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunrise-avant-restauration-${{ github.run_id }}
+          path: avant-restauration.json.gz.gpg
+          retention-days: 30
+
+      - name: Télécharger la sauvegarde choisie
+        uses: actions/download-artifact@v4
+        with:
+          name: sunrise-backup-${{ inputs.run_id }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: choisie
+
+      - name: Déchiffrer et restaurer
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
+              -o choisie/sauvegarde.json.gz -d choisie/sunrise-backup.json.gz.gpg
+          python restore_backup.py choisie/sauvegarde.json.gz --force
