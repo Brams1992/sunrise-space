@@ -35,13 +35,30 @@ jobs:
       - name: Installer les dépendances
         run: pip install "Flask>=3.0" "psycopg[binary]>=3.1"
 
-      - name: Copie de sécurité de l'état ACTUEL (avant d'écraser)
+      - name: Préparer la connexion (IPv4)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           test -n "$DATABASE_URL" || { echo "Le secret DATABASE_URL est manquant."; exit 1; }
           test -n "$BACKUP_PASSPHRASE" || { echo "Le secret BACKUP_PASSPHRASE est manquant."; exit 1; }
+          NEW="$(python - <<'PY'
+          import os, socket
+          from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+          p = urlsplit(os.environ["DATABASE_URL"].strip())
+          ip = socket.getaddrinfo(p.hostname, p.port or 5432, socket.AF_INET, socket.SOCK_STREAM)[0][4][0]
+          q = dict(parse_qsl(p.query)); q["hostaddr"] = ip
+          print(urlunsplit((p.scheme, p.netloc, p.path, urlencode(q), p.fragment)))
+          PY
+          )"
+          echo "::add-mask::$NEW"
+          echo "DATABASE_URL_V4=$NEW" >> "$GITHUB_ENV"
+
+      - name: Copie de sécurité de l'état ACTUEL (avant d'écraser)
+        env:
+          DATABASE_URL: ${{ env.DATABASE_URL_V4 }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
           python backup_db.py avant-restauration.json.gz
           gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
               --symmetric --cipher-algo AES256 -o avant-restauration.json.gz.gpg avant-restauration.json.gz
@@ -64,7 +81,7 @@ jobs:
 
       - name: Déchiffrer et restaurer
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ env.DATABASE_URL_V4 }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
         run: |
           gpg --batch --yes --pinentry-mode loopback --passphrase "$BACKUP_PASSPHRASE" \
