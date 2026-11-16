@@ -1297,7 +1297,7 @@ async function adminUsers() {
       $('#ul').innerHTML = users.length ? users.map((u) => `<article class="card item">
         <h3>${esc(u.name)} <span class="chip">${u.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${u.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</h3>
         <p class="muted">${esc(fmtPhone(u.phone))} · inscrit le ${esc(u.created_at.slice(0, 10))}</p>
-        <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button></div></article>`).join('')
+        <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button><button class="btn btn-sm btn-danger" data-del="${u.id}" data-name="${esc(u.name)}">🗑️ Supprimer</button></div></article>`).join('')
         : empty('🔍', 'Aucun résultat', '');
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
@@ -1305,6 +1305,14 @@ async function adminUsers() {
   $('#ul').addEventListener('click', async (e) => {
     const w = e.target.closest('[data-write]');
     if (w) { state.openThread = { id: +w.dataset.write, name: w.dataset.name }; return openTab('admin', 'inbox'); }
+    const d = e.target.closest('[data-del]');
+    if (d) {
+      const typed = prompt(`SUPPRESSION DÉFINITIVE de « ${d.dataset.name} ».\nSon compte, ses messages et ses demandes seront effacés. Impossible d'annuler.\n\nPour confirmer, tapez SUPPRIMER :`);
+      if (typed === null) return;
+      try { await api(`/api/admin/users/${d.dataset.del}`, { method: 'DELETE', body: { confirm: typed.trim() } }); toast('Compte supprimé définitivement'); load(); }
+      catch (err) { toast(err.message, 'bad'); }
+      return;
+    }
     const b = e.target.closest('[data-block]');
     if (!b) return;
     if (b.dataset.block === '1' && !confirm('Suspendre ce compte ? La personne sera déconnectée.')) return;

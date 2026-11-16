@@ -1138,6 +1138,30 @@ def admin_block(uid):
     return jsonify({"ok": True})
 
 
+@app.delete("/api/admin/users/<int:uid>")
+@auth_required("admin")
+def admin_delete_user(uid):
+    """Suppression DÉFINITIVE d'un compte client ou chauffeur et de ses données."""
+    if clean(body().get("confirm"), 20) != "SUPPRIMER":
+        return err("Confirmation manquante : tapez SUPPRIMER.", 400)
+    db = get_db()
+    u = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+    if not u or u["role"] == "admin":
+        return err("Utilisateur introuvable.", 404)
+    # Signalements faits par ou contre cette personne, puis ceux liés à ses demandes de course
+    db.execute("DELETE FROM reports WHERE reporter_id=? OR target_user_id=?", (uid, uid))
+    db.execute("UPDATE reports SET request_id=NULL WHERE request_id IN (SELECT id FROM ride_requests WHERE client_id=?)", (uid,))
+    db.execute("DELETE FROM ride_requests WHERE client_id=?", (uid,))
+    # Courses où elle était chauffeur : l'historique des clients reste, sans le chauffeur
+    db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE driver_id=? AND status='accepted'", (ts(), uid))
+    db.execute("UPDATE ride_requests SET driver_id=NULL WHERE driver_id=?", (uid,))
+    for t in ("tokens", "password_resets", "announcement_reads", "messages", "drivers"):
+        db.execute(f"DELETE FROM {t} WHERE " + ("user_id=?"), (uid,))
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.get("/api/admin/reports")
 @auth_required("admin")
 def admin_reports():
