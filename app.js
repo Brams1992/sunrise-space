@@ -233,6 +233,90 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+
+/* ---------- Notifications push : prévenu même application fermée ---------- */
+const PUSH_OK = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const IS_STANDALONE = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
+const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+function urlB64ToBytes(b64) {
+  const pad = '='.repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+/* Abonne cet appareil (ou le re-lie au compte connecté). La permission doit déjà être accordée. */
+async function syncPush() {
+  if (!PUSH_OK || !state.user || state.user.role === 'admin' || Notification.permission !== 'granted') return false;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      const { key } = await api('/api/push/key');
+      sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToBytes(key) });
+    }
+    await api('/api/push/subscribe', { method: 'POST', body: sub.toJSON() });
+    return true;
+  } catch { return false; }
+}
+
+async function enablePush() {
+  if (!PUSH_OK) return false;
+  const perm = await Notification.requestPermission();   // doit venir d'un toucher de l'utilisateur
+  if (perm !== 'granted') return false;
+  return syncPush();
+}
+
+async function forgetPush() {
+  try {
+    if (!PUSH_OK) return;
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) await api('/api/push/unsubscribe', { method: 'POST', body: { endpoint: sub.endpoint } });
+  } catch { /* rien */ }
+}
+
+function pushWhy() {
+  return state.user && state.user.role === 'driver'
+    ? 'Recevez les demandes de course près de vous, même application fermée.'
+    : 'Soyez prévenu dès qu\'un chauffeur accepte votre demande, même application fermée.';
+}
+
+function updatePushBar() {
+  const bar = $('#pushbar');
+  if (!bar) return;
+  const role = state.user && state.user.role;
+  bar.hidden = true;
+  if (role !== 'client' && role !== 'driver') return;
+  if (PUSH_OK) {
+    if (Notification.permission !== 'default') return;
+    bar.innerHTML = `<div><strong>🔔 Notifications</strong><br>${pushWhy()}</div><button class="btn btn-sm" id="push-on">Activer</button>`;
+    bar.hidden = false;
+    $('#push-on').onclick = async () => {
+      const ok = await enablePush();
+      toast(ok ? 'Notifications activées ✅' : 'Notifications non activées', ok ? undefined : 'bad');
+      updatePushBar();
+      if (state.tab === 'account') accountView();
+    };
+  } else if (IS_IOS && !IS_STANDALONE()) {
+    let hidden = false;
+    try { hidden = Date.now() - Number(localStorage.getItem('ss_push_hint') || 0) < 7 * 864e5; } catch { /* rien */ }
+    if (hidden) return;
+    bar.innerHTML = `<div><strong>📲 Notifications sur iPhone</strong><br>Touchez <b>Partager</b> puis <b>Sur l'écran d'accueil</b>, ouvrez l'icône Sunrise Space, et activez les notifications.</div><button class="btn btn-sm btn-ghost" id="push-x" aria-label="Fermer">✕</button>`;
+    bar.hidden = false;
+    $('#push-x').onclick = () => { try { localStorage.setItem('ss_push_hint', String(Date.now())); } catch { /* rien */ } bar.hidden = true; };
+  }
+}
+
+function pushAccountHTML() {
+  if (!state.user || state.user.role === 'admin') return '';
+  if (!PUSH_OK) return IS_IOS ? `<p class="muted tiny">🔔 Notifications : ajoutez d'abord l'application à l'écran d'accueil (Partager → Sur l'écran d'accueil), puis rouvrez-la depuis l'icône.</p>` : '';
+  const p = Notification.permission;
+  if (p === 'granted') return '<p class="muted tiny">🔔 Notifications activées ✅</p>';
+  if (p === 'denied') return `<p class="muted tiny">🔔 Notifications bloquées. Autorisez-les dans les Réglages de l'iPhone (Notifications → Sunrise Space).</p>`;
+  return `<button class="btn btn-ghost btn-block" id="btn-push">🔔 Activer les notifications</button>`;
+}
+
 /* ---------- Rendu principal ---------- */
 function render() {
   clearTimers();
@@ -255,6 +339,7 @@ function renderShell(role, tabs) {
         <div class="who">${esc(state.user.name)}<br><span style="opacity:.7">${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur' }[role]}</span></div>
       </header>
       <button class="annbar" id="annbar" hidden></button>
+      <div class="pushbar" id="pushbar" hidden></div>
       <main id="main"></main>
     </div>
     <nav class="bottomnav" aria-label="Navigation"><div class="inner">
@@ -262,6 +347,8 @@ function renderShell(role, tabs) {
     </div></nav>`;
   $$('.bottomnav [data-tab]').forEach((b) => (b.onclick = () => openTab(role, b.dataset.tab)));
   openTab(role, first);
+  updatePushBar();
+  syncPush();
   refreshUnread();
   clearInterval(state.unreadTimer);
   state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
@@ -472,6 +559,7 @@ function renderForcedChange() {
 
 async function logout() {
   clearInterval(state.unreadTimer);
+  await forgetPush();   // cet appareil ne doit plus recevoir les notifications de ce compte
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* on se déconnecte quand même */ }
   localStorage.removeItem('ss_token');
   stopLocSharing();
@@ -491,6 +579,7 @@ function accountView() {
         <dt>Validation</dt><dd>${{ pending: 'En attente', approved: 'Validé ✅', rejected: 'Refusé' }[d.approval]}</dd>` : ''}
       </dl>
       ${installButtonHTML()}
+      ${pushAccountHTML()}
       <button class="btn btn-ghost btn-block" id="btn-pw">🔒 Changer mon mot de passe</button>
       <button class="btn btn-dark btn-block" id="btn-logout">Se déconnecter</button>
     </section>
@@ -499,6 +588,8 @@ function accountView() {
     </section>`;
   $('#btn-pw').onclick = openChangePassword;
   $('#btn-logout').onclick = logout;
+  const bp = $('#btn-push');
+  if (bp) bp.onclick = async () => { const ok = await enablePush(); toast(ok ? 'Notifications activées ✅' : 'Notifications non activées', ok ? undefined : 'bad'); updatePushBar(); accountView(); };
 }
 
 /* ---------- Signalement ---------- */

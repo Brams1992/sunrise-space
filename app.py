@@ -10,7 +10,12 @@ import math
 import os
 import re
 import secrets
+import threading
 import time
+import base64
+import urllib.request
+import urllib.error
+from urllib.parse import urlsplit
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -29,6 +34,9 @@ else:
     import sqlite3
 
 # --- Réglages -----------------------------------------------------------------
+PUSH_DRIVER_MAX_AGE_H = 12     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 12 h
+NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
+NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
 REQUEST_TTL_MIN = 30         # une demande non prise expire après 30 min
 TOKEN_TTL_DAYS = 30
@@ -104,6 +112,18 @@ CREATE TABLE IF NOT EXISTS password_resets(
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','done','dismissed')),
   created_at TEXT NOT NULL,
   handled_at TEXT
+);
+CREATE TABLE IF NOT EXISTS push_subscriptions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_settings(
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS tokens(
   token_hash TEXT PRIMARY KEY,
@@ -837,6 +857,210 @@ def driver_dashboard():
     return jsonify({"driver": profile, "job": job, "requests": requests})
 
 
+
+# --- Notifications push (Web Push, RFC 8291 + VAPID RFC 8292) -----------------
+# Implémenté avec « cryptography » seulement. Fonctionne téléphone verrouillé ou application fermée
+# (iPhone : application ajoutée à l'écran d'accueil, iOS 16.4 ou plus).
+PUSH_HOSTS = (".googleapis.com", ".mozilla.com", ".push.apple.com", ".windows.com", ".mozaws.net")
+
+
+def b64u(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def b64u_dec(text):
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def push_endpoint_ok(endpoint):
+    """Seuls les vrais services push des navigateurs sont acceptés (évite qu'on fasse appeler une adresse interne)."""
+    try:
+        u = urlsplit(endpoint)
+    except ValueError:
+        return False
+    host = (u.hostname or "").lower()
+    return u.scheme == "https" and len(endpoint) <= 600 and any(host.endswith(h) or host == h[1:] for h in PUSH_HOSTS)
+
+
+def vapid_keys(db):
+    """Clé VAPID : variable VAPID_PRIVATE_KEY, sinon créée une fois et gardée dans la base."""
+    from cryptography.hazmat.primitives.asymmetric import ec
+    raw = os.environ.get("VAPID_PRIVATE_KEY", "").strip()
+    if not raw:
+        row = db.execute("SELECT value FROM app_settings WHERE key='vapid_private'").fetchone()
+        if row:
+            raw = row["value"]
+        else:
+            raw = b64u(ec.generate_private_key(ec.SECP256R1()).private_numbers().private_value.to_bytes(32, "big"))
+            try:
+                db.execute("INSERT INTO app_settings(key,value) VALUES('vapid_private',?)", (raw,))
+                db.commit()
+            except Exception:
+                db.rollback()
+                row = db.execute("SELECT value FROM app_settings WHERE key='vapid_private'").fetchone()
+                raw = row["value"]
+    priv = ec.derive_private_key(int.from_bytes(b64u_dec(raw), "big"), ec.SECP256R1())
+    return priv, vapid_public_b64(priv)
+
+
+def vapid_public_b64(priv):
+    from cryptography.hazmat.primitives import serialization
+    return b64u(priv.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint))
+
+
+def webpush_encrypt(payload, p256dh, auth, as_priv=None, salt=None):
+    """Chiffre le message pour un abonné (RFC 8291, aes128gcm). Renvoie le corps à envoyer."""
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    ua_pub = b64u_dec(p256dh)
+    auth_secret = b64u_dec(auth)
+    as_priv = as_priv or ec.generate_private_key(ec.SECP256R1())
+    as_pub = as_priv.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    shared = as_priv.exchange(ec.ECDH(), ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), ua_pub))
+    ikm = HKDF(hashes.SHA256(), 32, auth_secret, b"WebPush: info\x00" + ua_pub + as_pub).derive(shared)
+    salt = salt or os.urandom(16)
+    cek = HKDF(hashes.SHA256(), 16, salt, b"Content-Encoding: aes128gcm\x00").derive(ikm)
+    nonce = HKDF(hashes.SHA256(), 12, salt, b"Content-Encoding: nonce\x00").derive(ikm)
+    cipher = AESGCM(cek).encrypt(nonce, payload + b"\x02", None)
+    return salt + (4096).to_bytes(4, "big") + bytes([len(as_pub)]) + as_pub + cipher
+
+
+def vapid_header(priv, pub_b64, endpoint):
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    u = urlsplit(endpoint)
+    claims = {"aud": f"{u.scheme}://{u.netloc}", "exp": int(time.time()) + 12 * 3600,
+              "sub": os.environ.get("VAPID_SUBJECT", "mailto:contact@sunrise-space.app")}
+    head = b64u(json.dumps({"typ": "JWT", "alg": "ES256"}, separators=(",", ":")).encode())
+    body_ = b64u(json.dumps(claims, separators=(",", ":")).encode())
+    signing = f"{head}.{body_}".encode()
+    r, s_ = decode_dss_signature(priv.sign(signing, ec.ECDSA(hashes.SHA256())))
+    jwt = f"{head}.{body_}.{b64u(r.to_bytes(32, 'big') + s_.to_bytes(32, 'big'))}"
+    return f"vapid t={jwt}, k={pub_b64}"
+
+
+def _send_one(priv, pub_b64, sub, payload):
+    """Envoie une notification. Renvoie « ok », « gone » (abonnement mort : à supprimer) ou « error »."""
+    try:
+        data = webpush_encrypt(payload, sub["p256dh"], sub["auth"])
+        req = urllib.request.Request(sub["endpoint"], data=data, method="POST", headers={
+            "Authorization": vapid_header(priv, pub_b64, sub["endpoint"]),
+            "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
+            "TTL": "1800", "Urgency": "high"})
+        urllib.request.urlopen(req, timeout=8).close()
+        return "ok"
+    except urllib.error.HTTPError as e:
+        return "gone" if e.code in (404, 410) else "error"
+    except Exception:
+        return "error"
+
+
+def _deliver(subs, payload):
+    """Envoi en arrière-plan : n'attend jamais la réponse des services push."""
+    def work():
+        db = DB()
+        try:
+            priv, pub = vapid_keys(db)
+            for sub in subs:
+                if _send_one(priv, pub, sub, payload) == "gone":
+                    db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (sub["endpoint"],))
+                    db.commit()
+        except Exception:
+            pass
+        finally:
+            db.close()
+    threading.Thread(target=work, daemon=True).start()
+
+
+def notify_users(db, user_ids, title, body_text, tag=None):
+    """Prévient ces utilisateurs sur tous leurs appareils abonnés."""
+    ids = list({int(i) for i in user_ids})
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    subs = [dict(r) for r in db.execute(
+        f"SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN ({marks})", ids).fetchall()]
+    if subs:
+        _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/"}).encode())
+    return len(subs)
+
+
+@app.get("/api/push/key")
+@auth_required()
+def push_key():
+    return jsonify({"key": vapid_keys(get_db())[1]})
+
+
+@app.post("/api/push/subscribe")
+@auth_required()
+def push_subscribe():
+    data = body()
+    endpoint = data.get("endpoint") if isinstance(data.get("endpoint"), str) else ""
+    keys = data.get("keys") if isinstance(data.get("keys"), dict) else {}
+    p256dh, auth = keys.get("p256dh"), keys.get("auth")
+    if not (push_endpoint_ok(endpoint) and isinstance(p256dh, str) and isinstance(auth, str)):
+        return err("Abonnement invalide.")
+    try:
+        if len(b64u_dec(p256dh)) != 65 or len(b64u_dec(auth)) != 16:
+            return err("Abonnement invalide.")
+    except Exception:
+        return err("Abonnement invalide.")
+    db = get_db()
+    db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))   # l'appareil change de compte : il suit le dernier connecté
+    db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth,created_at) VALUES(?,?,?,?,?)",
+               (g.user["id"], endpoint, p256dh, auth, ts()))
+    old = db.execute("SELECT id FROM push_subscriptions WHERE user_id=? ORDER BY id DESC", (g.user["id"],)).fetchall()
+    for r in old[5:]:                                                           # 5 appareils au plus par personne
+        db.execute("DELETE FROM push_subscriptions WHERE id=?", (r["id"],))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/push/unsubscribe")
+@auth_required()
+def push_unsubscribe():
+    endpoint = body().get("endpoint")
+    db = get_db()
+    if isinstance(endpoint, str):
+        db.execute("DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?", (endpoint, g.user["id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup):
+    """Nouvelle demande : on prévient les chauffeurs disponibles à moins de 15 km de leur dernière position connue."""
+    fresh = ts(now() - timedelta(hours=PUSH_DRIVER_MAX_AGE_H))
+    rows = db.execute(
+        """SELECT d.user_id, d.lat, d.lng FROM drivers d JOIN users u ON u.id=d.user_id
+           WHERE d.approval='approved' AND d.availability='available' AND u.is_blocked=0
+                 AND d.lat IS NOT NULL AND d.location_at>=?
+                 AND (? = 'any' OR d.vehicle_type=?)""", (fresh, wanted, wanted)).fetchall()
+    near = sorted(((haversine_km(lat, lng, r["lat"], r["lng"]), r["user_id"]) for r in rows))
+    near = [(km, uid) for km, uid in near if km <= NEARBY_RADIUS_KM][:30]
+    for km, uid in near:
+        where = f" · {pickup}" if pickup else ""
+        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}", tag=f"req-{rid}")
+    return len(near)
+
+
+_nudges = {}
+
+
+def nudge_stale_driver(db, driver_id, location_at):
+    """Course en cours mais le chauffeur a quitté l'application : un rappel qui la rouvre."""
+    age = minutes_ago(location_at)
+    if age is not None and age < NUDGE_STALE_MIN:
+        return
+    if time.time() - _nudges.get(driver_id, 0) < NUDGE_EVERY_MIN * 60:
+        return
+    _nudges[driver_id] = time.time()
+    notify_users(db, [driver_id], "📍 Votre client vous attend",
+                 "Ouvrez Sunrise Space pour partager votre position.", tag="nudge")
+
+
 # --- Demandes de moto ---------------------------------------------------------
 def serialize_request_for_client(db, r):
     out = {
@@ -886,6 +1110,10 @@ def create_request():
     )
     db.commit()
     r = db.execute("SELECT * FROM ride_requests WHERE id=?", (new_id,)).fetchone()
+    try:
+        notify_drivers_of_request(db, new_id, coords[0], coords[1], wanted, clean(data.get("pickup_text"), 60))
+    except Exception:
+        app.logger.exception("push demande")
     return jsonify({"request": serialize_request_for_client(db, r)}), 201
 
 
@@ -900,6 +1128,13 @@ def current_request():
            ORDER BY id DESC LIMIT 1""",
         (g.user["id"], ts(now() - timedelta(minutes=2))),
     ).fetchone()
+    if r and r["status"] == "accepted" and r["driver_id"]:
+        try:
+            dr = db.execute("SELECT location_at FROM drivers WHERE user_id=?", (r["driver_id"],)).fetchone()
+            if dr:
+                nudge_stale_driver(db, r["driver_id"], dr["location_at"])
+        except Exception:
+            app.logger.exception("push rappel")
     return jsonify({"request": serialize_request_for_client(db, r) if r else None})
 
 
@@ -945,6 +1180,8 @@ def cancel_request(rid):
         db.execute("UPDATE drivers SET availability='available' WHERE user_id=? AND availability='busy'",
                    (r["driver_id"],))
     db.commit()
+    if r["driver_id"]:
+        notify_users(db, [r["driver_id"]], "Course annulée", "Le client a annulé sa demande.", tag=f"can-{rid}")
     return jsonify({"ok": True})
 
 
@@ -971,6 +1208,9 @@ def accept_request(rid):
         return err("Cette demande a déjà été prise ou a expiré.", 409)
     db.execute("UPDATE drivers SET availability='busy' WHERE user_id=?", (g.user["id"],))
     db.commit()
+    row = db.execute("SELECT client_id FROM ride_requests WHERE id=?", (rid,)).fetchone()
+    if row:
+        notify_users(db, [row["client_id"]], "✅ Course acceptée", f"{g.user['name']} arrive vers vous. Ouvrez l'application pour le suivre.", tag=f"acc-{rid}")
     return jsonify({"ok": True})
 
 
@@ -989,6 +1229,9 @@ def release_request(rid):
         return err("Course introuvable.", 404)
     db.execute("UPDATE drivers SET availability='available' WHERE user_id=?", (g.user["id"],))
     db.commit()
+    row = db.execute("SELECT client_id FROM ride_requests WHERE id=?", (rid,)).fetchone()
+    if row:
+        notify_users(db, [row["client_id"]], "Le chauffeur n'est plus disponible", "Votre demande est de nouveau ouverte : un autre chauffeur peut l'accepter.", tag=f"rel-{rid}")
     return jsonify({"ok": True})
 
 
@@ -1155,7 +1398,7 @@ def admin_delete_user(uid):
     # Courses où elle était chauffeur : l'historique des clients reste, sans le chauffeur
     db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE driver_id=? AND status='accepted'", (ts(), uid))
     db.execute("UPDATE ride_requests SET driver_id=NULL WHERE driver_id=?", (uid,))
-    for t in ("tokens", "password_resets", "announcement_reads", "messages", "drivers"):
+    for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages", "drivers"):
         db.execute(f"DELETE FROM {t} WHERE " + ("user_id=?"), (uid,))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
@@ -1273,7 +1516,7 @@ def validate_backup(db, data):
 
 def restore_all(db, data):
     """Remplace TOUT le contenu par celui de la sauvegarde, dans une seule transaction (l'appelant valide ou annule)."""
-    for table in ["tokens", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
+    for table in ["tokens", "push_subscriptions", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
         db.execute(f"DELETE FROM {table}")
     for table, _order in BACKUP_TABLES:
         groups = {}
