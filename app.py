@@ -35,6 +35,7 @@ else:
 
 # --- Réglages -----------------------------------------------------------------
 PUSH_DRIVER_MAX_AGE_H = 12     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 12 h
+GHOST_AFTER_H = 2             # « Disponible » sans position depuis 2 h : repassé automatiquement en indisponible
 NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
 NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
@@ -139,7 +140,8 @@ CREATE TABLE IF NOT EXISTS ride_requests(
   pickup_text TEXT, destination_text TEXT, note TEXT,
   vehicle_type TEXT NOT NULL DEFAULT 'any',
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','accepted','completed','cancelled','expired')),
-  created_at TEXT NOT NULL, accepted_at TEXT, closed_at TEXT
+  created_at TEXT NOT NULL, accepted_at TEXT, closed_at TEXT,
+  rating INTEGER, rating_comment TEXT
 );
 CREATE TABLE IF NOT EXISTS reports(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,6 +299,8 @@ def init_db(create_admin=True):
         ensure_column(db, "drivers", "vehicle_type", "TEXT NOT NULL DEFAULT 'moto'")
         ensure_column(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
+        ensure_column(db, "ride_requests", "rating", "INTEGER")
+        ensure_column(db, "ride_requests", "rating_comment", "TEXT")
         if create_admin:
             ensure_admin(db)
     finally:
@@ -489,11 +493,37 @@ def user_public(u):
             "must_change_password": bool(u["must_change_password"])}
 
 
+def driver_stats(db, user_id):
+    row = db.execute("SELECT COUNT(rating), AVG(rating) FROM ride_requests WHERE driver_id=? AND rating IS NOT NULL", (user_id,)).fetchone()
+    done = db.execute("SELECT COUNT(*) FROM ride_requests WHERE driver_id=? AND status='completed'", (user_id,)).fetchone()[0]
+    return {"rating_count": row[0], "rating_avg": round(float(row[1]), 1) if row[1] is not None else None, "rides_done": done}
+
+
+_last_sweep = [0.0]
+
+
+def sweep_ghost_drivers(db):
+    """Un chauffeur « Disponible » dont l'application est fermée depuis longtemps ne doit pas le rester."""
+    if time.time() - _last_sweep[0] < 60:
+        return
+    _last_sweep[0] = time.time()
+    limit = ts(now() - timedelta(hours=GHOST_AFTER_H))
+    rows = db.execute("SELECT user_id FROM drivers WHERE availability='available' AND (location_at IS NULL OR location_at<?)", (limit,)).fetchall()
+    if not rows:
+        return
+    ids = [r["user_id"] for r in rows]
+    for uid in ids:
+        db.execute("UPDATE drivers SET availability='unavailable' WHERE user_id=? AND availability='available'", (uid,))
+    db.commit()
+    notify_users(db, ids, "Vous êtes passé indisponible", "Sans position depuis 2 h. Rouvrez Sunrise Space et repassez « Disponible » pour recevoir des demandes.", tag="ghost")
+
+
 def driver_profile(db, user_id):
     d = db.execute("SELECT * FROM drivers WHERE user_id=?", (user_id,)).fetchone()
     if not d:
         return None
     return {
+        **driver_stats(db, user_id),
         "plate": d["plate"], "vehicle_type": d["vehicle_type"], "moto_model": d["moto_model"], "permis": d["permis"],
         "commune": d["commune"], "whatsapp": d["whatsapp"],
         "approval": d["approval"], "approval_note": d["approval_note"],
@@ -830,6 +860,7 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
 def driver_dashboard():
     db = get_db()
     expire_requests(db)
+    sweep_ghost_drivers(db)
     d = db.execute("SELECT * FROM drivers WHERE user_id=?", (g.user["id"],)).fetchone()
     profile = driver_profile(db, g.user["id"])
     job, requests = None, []
@@ -1067,7 +1098,7 @@ def serialize_request_for_client(db, r):
         "id": r["id"], "status": r["status"], "pickup_text": r["pickup_text"],
         "destination_text": r["destination_text"], "note": r["note"],
         "lat": r["lat"], "lng": r["lng"], "age_min": minutes_ago(r["created_at"]),
-        "vehicle_type": r["vehicle_type"], "driver": None,
+        "vehicle_type": r["vehicle_type"], "driver": None, "rating": r["rating"],
     }
     if r["driver_id"] and r["status"] in ("accepted", "completed"):
         d = db.execute(
@@ -1081,6 +1112,8 @@ def serialize_request_for_client(db, r):
                 "plate": d["plate"], "vehicle_type": d["vehicle_type"], "moto_model": d["moto_model"],
                 "lat": d["lat"] if r["status"] == "accepted" else None,
                 "lng": d["lng"] if r["status"] == "accepted" else None,
+                **{k: v for k, v in driver_stats(db, d["id"]).items() if k != "rides_done"},
+                "location_age_min": minutes_ago(d["location_at"]),
             }
     return out
 
@@ -1097,6 +1130,7 @@ def create_request():
         return err("Type de véhicule invalide.")
     db = get_db()
     expire_requests(db)
+    sweep_ghost_drivers(db)
     active = db.execute(
         "SELECT 1 FROM ride_requests WHERE client_id=? AND status IN ('open','accepted')", (g.user["id"],)
     ).fetchone()
@@ -1235,6 +1269,27 @@ def release_request(rid):
     return jsonify({"ok": True})
 
 
+@app.post("/api/requests/<int:rid>/rate")
+@auth_required("client")
+def rate_request(rid):
+    """Le client note son chauffeur (1 à 5 étoiles) une fois la course terminée."""
+    data = body()
+    stars = data.get("stars")
+    if not isinstance(stars, int) or isinstance(stars, bool) or not 1 <= stars <= 5:
+        return err("Choisissez une note de 1 à 5.")
+    db = get_db()
+    r = db.execute("SELECT status, driver_id, rating FROM ride_requests WHERE id=? AND client_id=?", (rid, g.user["id"])).fetchone()
+    if not r:
+        return err("Course introuvable.", 404)
+    if r["status"] != "completed" or not r["driver_id"]:
+        return err("Vous pourrez noter le chauffeur une fois la course terminée.", 409)
+    if r["rating"] is not None:
+        return err("Vous avez déjà noté cette course.", 409)
+    db.execute("UPDATE ride_requests SET rating=?, rating_comment=? WHERE id=?", (stars, clean(data.get("comment"), 200), rid))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.post("/api/requests/<int:rid>/complete")
 @auth_required("driver", "client")
 def complete_request(rid):
@@ -1295,6 +1350,7 @@ def create_report():
 def admin_stats():
     db = get_db()
     expire_requests(db)
+    sweep_ghost_drivers(db)
     one = lambda q, p=(): db.execute(q, p).fetchone()[0]
     fresh = ts(now() - timedelta(minutes=LOCATION_TTL_MIN))
     today = ts(now().replace(hour=0, minute=0, second=0))
@@ -1311,6 +1367,8 @@ def admin_stats():
         "rides_completed": one("SELECT COUNT(*) FROM ride_requests WHERE status='completed'"),
         "reports_open": one("SELECT COUNT(*) FROM reports WHERE status='open'"),
         "messages_unread": one("SELECT COUNT(*) FROM messages WHERE sender='user' AND read_at IS NULL"),
+        "rides_week": one("SELECT COUNT(*) FROM ride_requests WHERE status='completed' AND closed_at>=?", (ts(now() - timedelta(days=7)),)),
+        "avg_rating": (lambda v: round(float(v), 1) if v is not None else None)(one("SELECT AVG(rating) FROM ride_requests WHERE rating IS NOT NULL")),
         "password_resets_open": one("SELECT COUNT(*) FROM password_resets WHERE status='open'"),
     })
 

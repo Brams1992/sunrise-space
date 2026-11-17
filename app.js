@@ -56,8 +56,10 @@ async function api(path, opts = {}) {
   try {
     res = await fetch(path, { method: opts.method || 'GET', headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
   } catch {
+    netBar(true);
     throw new Error('Pas de connexion internet. Réessayez.');
   }
+  netBar(false);
   let data = {};
   try { data = await res.json(); } catch { /* corps vide */ }
   if (!res.ok) {
@@ -233,6 +235,22 @@ document.addEventListener('click', async (e) => {
   }
 });
 
+
+/* ---------- Notes ---------- */
+function starsText(avg, count) { return avg == null ? 'Pas encore de note' : `⭐ ${String(avg).replace('.', ',')} (${count} avis)`; }
+function ratingHTML(r) {
+  if (r.rating) return `<p class="muted center">Votre note : ${'⭐'.repeat(r.rating)}</p>`;
+  return `<div class="stack center"><b>Comment s'est passée la course ?</b><div class="stars">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="star" data-stars="${n}" data-rid="${r.id}" aria-label="${n} étoile${n > 1 ? 's' : ''}">⭐</button>`).join('')}</div></div>`;
+}
+
+/* ---------- Réseau faible ---------- */
+function netBar(show) {
+  let b = $('#netbar');
+  if (!b) { b = document.createElement('div'); b.id = 'netbar'; b.className = 'netbar'; b.textContent = '📶 Connexion perdue… reconnexion automatique'; document.body.appendChild(b); }
+  b.hidden = !show;
+}
+window.addEventListener('offline', () => netBar(true));
+window.addEventListener('online', () => netBar(false));
 
 /* ---------- Notifications push : prévenu même application fermée ---------- */
 const PUSH_OK = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
@@ -576,6 +594,7 @@ function accountView() {
       <dl class="kv"><dt>Nom</dt><dd>${esc(u.name)}</dd><dt>Téléphone</dt><dd>${esc(fmtPhone(u.phone))}</dd>
         <dt>Profil</dt><dd>${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur' }[u.role]}</dd>
         ${d ? `<dt>Véhicule</dt><dd>${veh(d.vehicle_type).icon} ${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</dd><dt>Commune</dt><dd>${esc(d.commune)}</dd>
+        <dt>Courses</dt><dd>${d.rides_done || 0} terminée${(d.rides_done || 0) > 1 ? 's' : ''}</dd><dt>Ma note</dt><dd>${starsText(d.rating_avg, d.rating_count)}</dd>
         <dt>Validation</dt><dd>${{ pending: 'En attente', approved: 'Validé ✅', rejected: 'Refusé' }[d.approval]}</dd>` : ''}
       </dl>
       ${installButtonHTML()}
@@ -747,7 +766,7 @@ async function clientRequest() {
 
   function driverBlock(d) {
     return `<div class="card flat">
-      <div class="row"><div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div><div class="grow"><h3>${esc(d.name)}</h3><p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p></div></div>
+      <div class="row"><div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div><div class="grow"><h3>${esc(d.name)}</h3><p class="tiny muted">${starsText(d.rating_avg, d.rating_count)}</p><p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p></div></div>
       <div class="row" style="margin-top:10px">
         <a class="btn btn-sm grow" href="tel:+225${esc(d.phone)}">📞 Appeler</a>
         <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(d.whatsapp, 'Bonjour, j\'ai fait une demande sur Sunrise Space.')}">WhatsApp</a>
@@ -788,6 +807,7 @@ async function clientRequest() {
     } else {
       const label = { completed: ['🎉', 'Course terminée', 'Merci d\'avoir utilisé Sunrise Space.'], cancelled: ['✖️', 'Demande annulée', ''], expired: ['⌛', 'Demande expirée', "Aucun chauffeur n'a pu la prendre. Réessayez."] }[r.status] || ['', '', ''];
       box.innerHTML = `<section class="card stack"><div class="empty"><div class="big">${label[0]}</div><h3>${label[1]}</h3><p>${esc(label[2])}</p></div>
+        ${r.status === 'completed' && r.driver ? ratingHTML(r) : ''}
         ${r.status === 'completed' && r.driver ? `<button class="btn btn-ghost btn-sm" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">⚑ Signaler ce chauffeur</button>` : ''}
         <button class="btn btn-block" id="btn-new">Nouvelle demande</button></section>`;
       const nb = $('#btn-new'); if (nb) nb.onclick = () => { lastKey = null; paint(null); };
@@ -841,7 +861,15 @@ async function clientRequest() {
     } catch { /* l'historique est secondaire */ }
   }
 
-  $('#reqbox').addEventListener('click', (e) => { const b = e.target.closest('[data-report]'); if (b) openReport(Number(b.dataset.report), b.dataset.name, null); });
+  $('#reqbox').addEventListener('click', async (e) => {
+    const st = e.target.closest('[data-stars]');
+    if (st) {
+      try { await api(`/api/requests/${st.dataset.rid}/rate`, { method: 'POST', body: { stars: Number(st.dataset.stars) } }); toast('Merci pour votre note ⭐'); lastKey = null; load(); }
+      catch (err) { toast(err.message, 'bad'); }
+      return;
+    }
+    const b = e.target.closest('[data-report]'); if (b) openReport(Number(b.dataset.report), b.dataset.name, null);
+  });
   await load(); loadHist();
   every(5000, load);
   every(30000, loadHist);
@@ -1300,7 +1328,9 @@ async function adminStats() {
         ${card(s.clients, 'Clients inscrits')}
         ${card(s.drivers, 'Chauffeurs inscrits')}
         ${card(s.requests_today, 'Demandes aujourd\'hui')}
-        ${card(s.rides_completed, 'Courses terminées')}</div>`;
+        ${card(s.rides_completed, 'Courses terminées')}
+        ${card(s.rides_week, 'Courses sur 7 jours')}
+        ${card(s.avg_rating == null ? '—' : String(s.avg_rating).replace('.', ',') + ' ⭐', 'Note moyenne')}</div>`;
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
   await load(); every(15000, load);

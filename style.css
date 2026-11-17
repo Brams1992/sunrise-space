@@ -231,3 +231,10 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .pushbar { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin: 10px 14px 0; padding: 12px 14px; border-radius: 14px; background: #fff3e0; border: 1px solid #ffd9a8; color: var(--night); font-size: .92rem; line-height: 1.35; }
 .pushbar[hidden] { display: none; }
 .pushbar .btn { flex: none; }
+
+.stars { display: flex; justify-content: center; gap: 4px; }
+.star { background: none; border: 0; font-size: 2.1rem; padding: 6px; cursor: pointer; filter: grayscale(1) opacity(.45); transition: filter .15s, transform .15s; }
+.star:hover, .star:active, .star:focus-visible { filter: none; transform: scale(1.15); }
+.center { text-align: center; }
+.netbar { position: fixed; left: 0; right: 0; top: 0; z-index: 60; padding: 8px 12px; text-align: center; font-weight: 800; font-size: .9rem; background: #c0392b; color: #fff; }
+.netbar[hidden] { display: none; }
