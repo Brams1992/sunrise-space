@@ -1310,7 +1310,26 @@ async function adminStats() {
       <button class="btn btn-ghost btn-block" id="bk">Télécharger une sauvegarde</button>
       <p class="muted">Pour revenir à une ancienne sauvegarde, choisissez le fichier .json téléchargé ici. Un aperçu s'affiche d'abord, rien n'est modifié avant votre confirmation.</p>
       <button class="btn btn-ghost btn-block" id="rs">Restaurer depuis un fichier</button>
-      <input type="file" id="rsfile" accept=".json,application/json" hidden></section>`;
+      <input type="file" id="rsfile" accept=".json,application/json" hidden>
+      <div id="sc"></div></section>`;
+  (async () => {
+    try {
+      const { copies } = await api('/api/admin/safety-copies');
+      const list = copies.filter((c) => c.kind === 'restore');
+      $('#sc').innerHTML = list.length ? `<h4>Copies automatiques avant restauration</h4><p class="muted tiny">Le serveur garde l'état précédent à chaque restauration. Téléchargez-le puis « Restaurer depuis un fichier » pour annuler.</p>
+        ${list.map((c) => `<div class="row"><span class="grow tiny">${esc(c.label)}</span><button class="btn btn-sm btn-ghost" data-sc="${c.id}">Télécharger</button></div>`).join('')}` : '';
+    } catch { /* secondaire */ }
+  })();
+  $('#sc').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-sc]');
+    if (!b) return;
+    try {
+      const res = await fetch(`/api/admin/safety-copies/${b.dataset.sc}/download`, { headers: { Authorization: 'Bearer ' + state.token } });
+      if (!res.ok) throw new Error('Téléchargement impossible.');
+      const a = document.createElement('a'); a.href = URL.createObjectURL(await res.blob()); a.download = `sunrise-avant-restauration-${b.dataset.sc}.json`;
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (err) { toast(err.message, 'bad'); }
+  });
   $('#bk').onclick = (e) => downloadBackup(e.currentTarget);
   $('#rs').onclick = () => $('#rsfile').click();
   $('#rsfile').onchange = (e) => pickRestoreFile(e.currentTarget);
@@ -1385,7 +1404,24 @@ async function adminUsers() {
   let role = '', q = '';
   $('#main').innerHTML = `<div id="pwr"></div><h2>Utilisateurs</h2>
     <div class="row"><input id="uq" type="search" placeholder="Rechercher un nom ou un numéro…" style="flex:1" aria-label="Rechercher"></div>
-    <div id="ft"></div><div id="ul" class="list cols"></div>`;
+    <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div>`;
+  async function loadBin() {
+    try {
+      const { copies } = await api('/api/admin/safety-copies');
+      const gone = copies.filter((c) => c.kind === 'user_delete');
+      $('#bin').innerHTML = gone.length ? `<section class="card stack"><h3>♻️ Corbeille (30 jours)</h3>
+        <p class="muted">Comptes supprimés par erreur ? Vous pouvez les remettre, avec leur mot de passe, leurs messages et leurs courses.</p>
+        ${gone.map((c) => `<article class="card flat"><p><b>${esc(c.label)}</b></p><p class="muted">supprimé ${fmtWhen(c.created_at)}</p>
+          <button class="btn btn-sm" data-undel="${c.id}">Restaurer ce compte</button></article>`).join('')}</section>` : '';
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  $('#bin').addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-undel]');
+    if (!b) return;
+    b.disabled = true;
+    try { await api(`/api/admin/safety-copies/${b.dataset.undel}/restore-user`, { method: 'POST', body: {} }); toast('Compte restauré ✅'); load(); }
+    catch (err) { toast(err.message, 'bad'); b.disabled = false; }
+  });
   async function loadResets() {
     try {
       const { requests } = await api('/api/admin/password-resets');
@@ -1410,7 +1446,7 @@ async function adminUsers() {
     } catch (err) { toast(err.message, 'bad'); b.disabled = false; loadResets(); }
   });
   async function load() {
-    loadResets();
+    loadResets(); loadBin();
     $('#ft').innerHTML = filterTabs([['', 'Tous'], ['client', 'Clients'], ['driver', 'Chauffeurs']], role, 'r');
     $$('#ft [data-r]').forEach((b) => (b.onclick = () => { role = b.dataset.r; load(); }));
     try {

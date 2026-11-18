@@ -13,6 +13,7 @@ import secrets
 import threading
 import time
 import base64
+import zlib
 import urllib.request
 import urllib.error
 from urllib.parse import urlsplit
@@ -121,6 +122,13 @@ CREATE TABLE IF NOT EXISTS push_subscriptions(
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS safety_copies(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  label TEXT NOT NULL,
+  data TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_settings(
   key TEXT PRIMARY KEY,
@@ -1439,6 +1447,78 @@ def admin_block(uid):
     return jsonify({"ok": True})
 
 
+
+# --- Copies de sécurité automatiques (corbeille) -------------------------------
+def save_safety_copy(db, kind, label, payload):
+    """Garde une copie compressée avant une action irréversible. On ne garde que les plus récentes."""
+    raw = base64.b64encode(zlib.compress(json.dumps(payload, ensure_ascii=False, default=str).encode(), 6)).decode()
+    db.execute("INSERT INTO safety_copies(created_at,kind,label,data) VALUES(?,?,?,?)", (ts(), kind, label, raw))
+    db.execute("DELETE FROM safety_copies WHERE kind='user_delete' AND created_at<?", (ts(now() - timedelta(days=30)),))
+    old = db.execute("SELECT id FROM safety_copies WHERE kind='restore' ORDER BY id DESC").fetchall()
+    for r in old[3:]:
+        db.execute("DELETE FROM safety_copies WHERE id=?", (r["id"],))
+    db.commit()
+
+
+def load_safety_copy(row):
+    return json.loads(zlib.decompress(base64.b64decode(row["data"])).decode())
+
+
+@app.get("/api/admin/safety-copies")
+@auth_required("admin")
+def admin_safety_copies():
+    rows = get_db().execute("SELECT id, created_at, kind, label FROM safety_copies ORDER BY id DESC LIMIT 60").fetchall()
+    return jsonify({"copies": [dict(r) for r in rows]})
+
+
+@app.get("/api/admin/safety-copies/<int:cid>/download")
+@auth_required("admin")
+def admin_safety_download(cid):
+    row = get_db().execute("SELECT * FROM safety_copies WHERE id=? AND kind='restore'", (cid,)).fetchone()
+    if not row:
+        return err("Copie introuvable.", 404)
+    payload = json.dumps(load_safety_copy(row), ensure_ascii=False)
+    return Response(payload, mimetype="application/json", headers={
+        "Content-Disposition": f'attachment; filename="sunrise-avant-restauration-{row["created_at"][:10]}.json"', "Cache-Control": "no-store"})
+
+
+@app.post("/api/admin/safety-copies/<int:cid>/restore-user")
+@auth_required("admin")
+def admin_restore_user(cid):
+    """Remet un compte supprimé par erreur (même mot de passe, mêmes messages et courses)."""
+    db = get_db()
+    row = db.execute("SELECT * FROM safety_copies WHERE id=? AND kind='user_delete'", (cid,)).fetchone()
+    if not row:
+        return err("Copie introuvable.", 404)
+    data = load_safety_copy(row)
+    user = data["user"]
+    if db.execute("SELECT 1 FROM users WHERE phone=? OR id=?", (user["phone"], user["id"])).fetchone():
+        return err("Ce numéro (ou cette identité) existe déjà : impossible de restaurer ce compte.", 409)
+
+    def put(table, rec):
+        cols = [c for c in table_columns(db, table) if c in rec]
+        db.execute(f"INSERT INTO {table}({', '.join(cols)}) VALUES({', '.join('?' for _ in cols)})", [rec[c] for c in cols])
+    try:
+        put("users", user)
+        if data.get("driver"):
+            d = dict(data["driver"]); d["availability"] = "unavailable"
+            put("drivers", d)
+        for m in data.get("messages", []):
+            put("messages", m)
+        for r in data.get("rides", []):
+            if r.get("status") in ("open", "accepted"):
+                r = {**r, "status": "cancelled", "closed_at": ts()}
+            r = {**r, "driver_id": r.get("driver_id") if db.execute("SELECT 1 FROM users WHERE id=?", (r.get("driver_id"),)).fetchone() else None}
+            put("ride_requests", r)
+        db.execute("DELETE FROM safety_copies WHERE id=?", (cid,))
+        db.commit()
+    except Exception:
+        db.rollback()
+        app.logger.exception("Échec de la restauration d'un compte")
+        return err("La restauration du compte a échoué. Rien n'a été modifié.", 500)
+    return jsonify({"ok": True})
+
+
 @app.delete("/api/admin/users/<int:uid>")
 @auth_required("admin")
 def admin_delete_user(uid):
@@ -1449,6 +1529,14 @@ def admin_delete_user(uid):
     u = db.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
     if not u or u["role"] == "admin":
         return err("Utilisateur introuvable.", 404)
+    # Copie de sécurité (corbeille, 30 jours) avant d'effacer quoi que ce soit
+    urow = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    save_safety_copy(db, "user_delete", f"{urow['name']} ({'chauffeur' if u['role'] == 'driver' else 'client'}) · {urow['phone']}", {
+        "user": dict(urow),
+        "driver": (lambda r: dict(r) if r else None)(db.execute("SELECT * FROM drivers WHERE user_id=?", (uid,)).fetchone()),
+        "messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE user_id=?", (uid,)).fetchall()],
+        "rides": [dict(r) for r in db.execute("SELECT * FROM ride_requests WHERE client_id=?", (uid,)).fetchall()],
+    })
     # Signalements faits par ou contre cette personne, puis ceux liés à ses demandes de course
     db.execute("DELETE FROM reports WHERE reporter_id=? OR target_user_id=?", (uid, uid))
     db.execute("UPDATE reports SET request_id=NULL WHERE request_id IN (SELECT id FROM ride_requests WHERE client_id=?)", (uid,))
@@ -1605,6 +1693,7 @@ def admin_restore():
     if body.get("confirmation") != "RESTAURER":
         return err("Tapez RESTAURER en majuscules pour confirmer.", 400)
     try:
+        save_safety_copy(db, "restore", "Avant la restauration du " + ts(), export_all(db))
         restore_all(db, body["backup"])
         db.commit()
     except Exception:
