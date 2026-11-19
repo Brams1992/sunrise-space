@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS users(
   password_hash TEXT NOT NULL,
   is_blocked INTEGER NOT NULL DEFAULT 0,
   must_change_password INTEGER NOT NULL DEFAULT 0,
+  staff_scope TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS drivers(
@@ -306,6 +307,7 @@ def init_db(create_admin=True):
         db.commit()
         ensure_column(db, "drivers", "vehicle_type", "TEXT NOT NULL DEFAULT 'moto'")
         ensure_column(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "users", "staff_scope", "TEXT")
         ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
         ensure_column(db, "ride_requests", "rating", "INTEGER")
         ensure_column(db, "ride_requests", "rating_comment", "TEXT")
@@ -317,7 +319,7 @@ def init_db(create_admin=True):
 
 def ensure_admin(db):
     """Crée le compte administrateur au premier lancement."""
-    existing = db.execute("SELECT id FROM users WHERE role='admin' LIMIT 1").fetchone()
+    existing = db.execute("SELECT id FROM users WHERE role='admin' AND staff_scope IS NULL LIMIT 1").fetchone()
     if existing:
         # Réinitialisation volontaire : RESET_ADMIN_PASSWORD=oui + ADMIN_PASSWORD (+ ADMIN_PHONE)
         wanted = os.environ.get("ADMIN_PASSWORD")
@@ -441,6 +443,10 @@ def issue_token(db, user_id):
     return token
 
 
+# Un « validateur » est un compte admin à accès réduit (staff_scope='validator') : il ne peut appeler QUE ces pages.
+VALIDATOR_ENDPOINTS = {"admin_drivers", "admin_driver_approval", "admin_users", "me", "logout", "change_password"}
+
+
 def auth_required(*roles):
     def deco(fn):
         @wraps(fn)
@@ -463,6 +469,8 @@ def auth_required(*roles):
                 return err("Accès refusé.", 403)
             if row["must_change_password"] and request.endpoint not in ("change_password", "logout", "me"):
                 return err("Choisissez d'abord un nouveau mot de passe.", 403)
+            if row["role"] == "admin" and row["staff_scope"] == "validator" and request.endpoint not in VALIDATOR_ENDPOINTS:
+                return err("Accès refusé.", 403)
             g.user = row
             g.token_hash = hash_token(token)
             return fn(*a, **kw)
@@ -498,7 +506,7 @@ def expire_requests(db):
 
 def user_public(u):
     return {"id": u["id"], "role": u["role"], "name": u["name"], "phone": u["phone"],
-            "must_change_password": bool(u["must_change_password"])}
+            "must_change_password": bool(u["must_change_password"]), "scope": u["staff_scope"]}
 
 
 def driver_stats(db, user_id):
@@ -1439,6 +1447,64 @@ def admin_driver_approval(uid):
     return jsonify({"ok": True})
 
 
+@app.get("/api/admin/validators")
+@auth_required("admin")
+def admin_validators():
+    rows = get_db().execute("SELECT id, name, phone, is_blocked, created_at FROM users WHERE role='admin' AND staff_scope='validator' ORDER BY id DESC").fetchall()
+    return jsonify({"validators": [dict(r) for r in rows]})
+
+
+@app.post("/api/admin/validators")
+@auth_required("admin")
+def admin_create_validator():
+    """Ouvre un accès réduit : valider les chauffeurs + voir la liste des inscrits, rien d'autre."""
+    data = body()
+    name = clean(data.get("name"), 60)
+    phone = normalize_phone(data.get("phone"))
+    password = str(data.get("password") or "")
+    if len(name) < 2:
+        return err("Entrez le nom du validateur.")
+    if not phone:
+        return err("Numéro invalide. Entrez les 10 chiffres.")
+    if len(password) < 6 or len(password) > 100:
+        return err("Le mot de passe provisoire doit contenir au moins 6 caractères.")
+    db = get_db()
+    if db.execute("SELECT 1 FROM users WHERE phone=?", (phone,)).fetchone():
+        return err("Ce numéro a déjà un compte.", 409)
+    uid = db.insert("INSERT INTO users(role,name,phone,password_hash,created_at,must_change_password,staff_scope) VALUES('admin',?,?,?,?,1,'validator')",
+                    (name, phone, generate_password_hash(password), ts()))
+    db.commit()
+    return jsonify({"ok": True, "id": uid}), 201
+
+
+@app.post("/api/admin/validators/<int:uid>/password")
+@auth_required("admin")
+def admin_validator_password(uid):
+    password = str(body().get("password") or "")
+    if len(password) < 6 or len(password) > 100:
+        return err("Le mot de passe provisoire doit contenir au moins 6 caractères.")
+    db = get_db()
+    if not db.execute("SELECT 1 FROM users WHERE id=? AND role='admin' AND staff_scope='validator'", (uid,)).fetchone():
+        return err("Validateur introuvable.", 404)
+    db.execute("UPDATE users SET password_hash=?, must_change_password=1 WHERE id=?", (generate_password_hash(password), uid))
+    db.execute("DELETE FROM tokens WHERE user_id=?", (uid,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.delete("/api/admin/validators/<int:uid>")
+@auth_required("admin")
+def admin_delete_validator(uid):
+    db = get_db()
+    if not db.execute("SELECT 1 FROM users WHERE id=? AND role='admin' AND staff_scope='validator'", (uid,)).fetchone():
+        return err("Validateur introuvable.", 404)
+    for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages"):
+        db.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.get("/api/admin/users")
 @auth_required("admin")
 def admin_users():
@@ -1674,7 +1740,7 @@ def validate_backup(db, data):
                     raise BackupError(f"Sauvegarde abîmée (table « {table} »).")
     if total > MAX_BACKUP_ROWS:
         raise BackupError("Sauvegarde trop volumineuse pour être restaurée depuis l'application.")
-    admins = [u for u in tables.get("users", []) if u.get("role") == "admin" and not u.get("is_blocked") and u.get("password_hash")]
+    admins = [u for u in tables.get("users", []) if u.get("role") == "admin" and u.get("staff_scope") != "validator" and not u.get("is_blocked") and u.get("password_hash")]
     if not admins:
         raise BackupError("Cette sauvegarde ne contient aucun compte administrateur actif : vous ne pourriez plus vous connecter.")
     return {

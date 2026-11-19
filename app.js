@@ -386,16 +386,17 @@ function render() {
   if (state.user.must_change_password) return renderForcedChange();
   if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
+  if (state.user.role === 'admin' && state.user.scope === 'validator') return renderShell('validator', [['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Inscrits'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
 }
 
 function renderShell(role, tabs) {
   const first = tabs[0][0];
   $('#app').innerHTML = `
-    <div class="shell ${role === 'admin' ? 'wide' : ''}">
+    <div class="shell ${role === 'admin' || role === 'validator' ? 'wide' : ''}">
       <header class="topbar">
         <div class="brand"><img src="/icon-192.png" alt="" width="30" height="30"><span>Sunrise Space</span></div>
-        <div class="who">${esc(state.user.name)}<br><span style="opacity:.7">${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur' }[role]}</span></div>
+        <div class="who">${esc(state.user.name)}<br><span style="opacity:.7">${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur', validator: 'Validateur' }[role]}</span></div>
       </header>
       <button class="annbar" id="annbar" hidden></button>
       <div class="pushbar" id="pushbar" hidden></div>
@@ -407,9 +408,10 @@ function renderShell(role, tabs) {
   $$('.bottomnav [data-tab]').forEach((b) => (b.onclick = () => openTab(role, b.dataset.tab)));
   openTab(role, first);
   updatePushBar();
+  clearInterval(state.unreadTimer);
+  if (role === 'validator') return;   // pas de messagerie ni de notifications pour un validateur
   syncPush();
   refreshUnread();
-  clearInterval(state.unreadTimer);
   state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
 }
 
@@ -447,6 +449,7 @@ function openTab(role, tab) {
     client: { nearby: clientNearby, request: clientRequest, inbox: userInbox, account: accountView },
     driver: { home: driverHome, inbox: userInbox, account: accountView },
     admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, reports: adminReports, inbox: adminInbox },
+    validator: { drivers: adminDrivers, users: validatorUsers, account: validatorAccount },
   };
   views[role][tab]();
 }
@@ -1407,6 +1410,71 @@ async function adminStats() {
   await load(); every(15000, load);
 }
 
+/* ---------- Validateur : accès réduit ---------- */
+async function validatorUsers() {
+  let role = '', q = '';
+  $('#main').innerHTML = `<h2>Inscrits</h2>
+    <div class="row"><input id="uq" type="search" placeholder="Rechercher un nom ou un numéro…" style="flex:1" aria-label="Rechercher"></div>
+    <div id="ft"></div><div id="ul" class="list cols"></div>`;
+  async function load() {
+    $('#ft').innerHTML = filterTabs([['', 'Tous'], ['client', 'Clients'], ['driver', 'Chauffeurs']], role, 'r');
+    $$('#ft [data-r]').forEach((b) => (b.onclick = () => { role = b.dataset.r; load(); }));
+    try {
+      const { users } = await api(`/api/admin/users?role=${role}&q=${encodeURIComponent(q)}`);
+      $('#ul').innerHTML = users.length ? users.map((u) => `<article class="card item">
+        <h3>${esc(u.name)} <span class="chip">${u.role === 'driver' ? 'Chauffeur' : 'Client'}</span></h3>
+        <dl class="kv"><dt>Téléphone</dt><dd>${esc(fmtPhone(u.phone))}</dd><dt>Inscrit</dt><dd>${fmtWhen(u.created_at)}</dd></dl></article>`).join('')
+        : empty('👥', 'Aucun résultat', 'Aucun inscrit ne correspond.');
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  let timer; $('#uq').oninput = (e) => { q = e.target.value.trim(); clearTimeout(timer); timer = setTimeout(load, 300); };
+  await load();
+}
+
+function validatorAccount() {
+  $('#main').innerHTML = `<section class="card stack"><h2>Mon compte</h2>
+    <dl class="kv"><dt>Nom</dt><dd>${esc(state.user.name)}</dd><dt>Téléphone</dt><dd>${esc(fmtPhone(state.user.phone))}</dd><dt>Accès</dt><dd>Validation des chauffeurs et liste des inscrits</dd></dl>
+    <button class="btn btn-ghost btn-block" id="btn-pw">Changer mon mot de passe</button>
+    <button class="btn btn-ghost btn-block" id="btn-logout">Se déconnecter</button></section>`;
+  $('#btn-pw').onclick = openChangePassword;
+  $('#btn-logout').onclick = logout;
+}
+
+/* Côté administrateur : ouvrir, réinitialiser ou retirer un accès validateur */
+function validatorForm(m0, title, withName, onSubmit) {
+  const m = modal(`<h2>${esc(title)}</h2>
+    ${withName ? `<label for="vn">Nom</label><input id="vn" autocomplete="off" placeholder="Ex. Valérie Koffi">
+    <label for="vph">Téléphone (10 chiffres)</label><input id="vph" inputmode="tel" autocomplete="off" placeholder="07 07 07 07 07">` : ''}
+    <label for="vp">Mot de passe provisoire (6 caractères minimum)</label><input id="vp" autocomplete="off" placeholder="Ex. Soleil26">
+    <p class="muted tiny">La personne devra choisir son propre mot de passe à sa première connexion.</p>
+    <div class="row"><button class="btn btn-ghost grow" id="v-cancel">Annuler</button><button class="btn grow" id="v-ok">Valider</button></div>`);
+  $('#v-cancel', m.el).onclick = () => m.close();
+  $('#v-ok', m.el).onclick = async (e) => {
+    e.currentTarget.disabled = true;
+    try { await onSubmit({ name: withName ? $('#vn', m.el).value : undefined, phone: withName ? $('#vph', m.el).value : undefined, password: $('#vp', m.el).value }); m.close(); }
+    catch (err) { toast(err.message, 'bad'); e.currentTarget.disabled = false; }
+  };
+}
+
+async function loadValidators() {
+  const box = $('#vals');
+  if (!box) return;
+  try {
+    const { validators } = await api('/api/admin/validators');
+    box.innerHTML = `<section class="card stack"><h3>🧑‍💼 Validateurs</h3>
+      <p class="muted">Un validateur peut seulement <b>valider ou refuser les chauffeurs</b> et <b>voir la liste des clients et chauffeurs inscrits</b>. Il ne voit ni les messages, ni les signalements, ni les sauvegardes, et ne peut rien supprimer.</p>
+      ${validators.map((v) => `<article class="card flat"><p><b>${esc(v.name)}</b> · ${esc(fmtPhone(v.phone))}</p><p class="muted tiny">ajouté ${fmtWhen(v.created_at)}</p>
+        <div class="actions"><button class="btn btn-sm btn-ghost" data-vpw="${v.id}">Nouveau mot de passe</button><button class="btn btn-sm btn-danger" data-vdel="${v.id}" data-name="${esc(v.name)}">Retirer l'accès</button></div></article>`).join('')}
+      <button class="btn btn-block" id="v-add">＋ Ajouter un validateur</button></section>`;
+    $('#v-add').onclick = () => validatorForm(null, 'Nouveau validateur', true, async (d) => { await api('/api/admin/validators', { method: 'POST', body: d }); toast('Validateur ajouté ✅'); loadValidators(); });
+    $$('[data-vpw]', box).forEach((b) => (b.onclick = () => validatorForm(null, 'Nouveau mot de passe', false, async (d) => { await api(`/api/admin/validators/${b.dataset.vpw}/password`, { method: 'POST', body: { password: d.password } }); toast('Mot de passe changé. Il sera déconnecté.'); })));
+    $$('[data-vdel]', box).forEach((b) => (b.onclick = async () => {
+      if (!confirm(`Retirer l'accès de ${b.dataset.name} ? Son compte sera supprimé.`)) return;
+      try { await api(`/api/admin/validators/${b.dataset.vdel}`, { method: 'DELETE' }); toast('Accès retiré'); loadValidators(); } catch (err) { toast(err.message, 'bad'); }
+    }));
+  } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+}
+
 async function adminDrivers() {
   let filter = 'pending';
   $('#main').innerHTML = '<h2>Chauffeurs</h2><div id="ft"></div><div id="dl" class="list cols"></div>';
@@ -1456,7 +1524,8 @@ async function adminUsers() {
   let role = '', q = '';
   $('#main').innerHTML = `<div id="pwr"></div><h2>Utilisateurs</h2>
     <div class="row"><input id="uq" type="search" placeholder="Rechercher un nom ou un numéro…" style="flex:1" aria-label="Rechercher"></div>
-    <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div>`;
+    <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div><div id="vals"></div>`;
+  loadValidators();
   async function loadBin() {
     try {
       const { copies } = await api('/api/admin/safety-copies');
