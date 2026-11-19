@@ -37,6 +37,7 @@ else:
 # --- Réglages -----------------------------------------------------------------
 PUSH_DRIVER_MAX_AGE_H = 12     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 12 h
 GHOST_AFTER_H = 2             # « Disponible » sans position depuis 2 h : repassé automatiquement en indisponible
+ONLINE_WINDOW_MIN = 3          # « en ligne » = application ouverte à l'écran dans les 3 dernières minutes
 NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
 NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
@@ -94,6 +95,7 @@ CREATE TABLE IF NOT EXISTS users(
   is_blocked INTEGER NOT NULL DEFAULT 0,
   must_change_password INTEGER NOT NULL DEFAULT 0,
   staff_scope TEXT,
+  last_seen_at TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS drivers(
@@ -308,6 +310,7 @@ def init_db(create_admin=True):
         ensure_column(db, "drivers", "vehicle_type", "TEXT NOT NULL DEFAULT 'moto'")
         ensure_column(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "users", "staff_scope", "TEXT")
+        ensure_column(db, "users", "last_seen_at", "TEXT")
         ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
         ensure_column(db, "ride_requests", "rating", "INTEGER")
         ensure_column(db, "ride_requests", "rating_comment", "TEXT")
@@ -471,6 +474,9 @@ def auth_required(*roles):
                 return err("Choisissez d'abord un nouveau mot de passe.", 403)
             if row["role"] == "admin" and row["staff_scope"] == "validator" and request.endpoint not in VALIDATOR_ENDPOINTS:
                 return err("Accès refusé.", 403)
+            if not row["last_seen_at"] or row["last_seen_at"] < ts(now() - timedelta(seconds=60)):
+                db.execute("UPDATE users SET last_seen_at=? WHERE id=?", (ts(), row["id"]))   # au plus une écriture par minute
+                db.commit()
             g.user = row
             g.token_hash = hash_token(token)
             return fn(*a, **kw)
@@ -601,6 +607,29 @@ def meta():
 
 
 # --- Authentification ---------------------------------------------------------
+def get_setting(db, key, default=""):
+    row = db.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(db, key, value):
+    if db.execute("SELECT 1 FROM app_settings WHERE key=?", (key,)).fetchone():
+        db.execute("UPDATE app_settings SET value=? WHERE key=?", (value, key))
+    else:
+        db.execute("INSERT INTO app_settings(key,value) VALUES(?,?)", (key, value))
+
+
+def send_welcome(db, uid, role, name):
+    """Message de bienvenue automatique (réglé par l'admin) déposé dans la messagerie du nouvel inscrit."""
+    text = get_setting(db, f"welcome_{role}").strip()
+    if not text:
+        return
+    first = (name.split() or [""])[0]
+    db.execute("INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)",
+               (uid, "admin", text.replace("{prenom}", first), ts()))
+    db.commit()
+
+
 @app.post("/api/auth/register")
 def register():
     data = body()
@@ -651,6 +680,11 @@ def register():
             (uid, driver["plate"], driver["vehicle_type"], driver["moto_model"], driver["permis"], driver["commune"], driver["whatsapp"]),
         )
     db.commit()
+    try:
+        send_welcome(db, uid, role, name)
+    except Exception:
+        db.rollback()
+        app.logger.exception("message de bienvenue")
     token = issue_token(db, uid)
     user = db.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
     return jsonify({"token": token, "user": user_public(user), "driver": driver_profile(db, uid)}), 201
@@ -791,7 +825,7 @@ def admin_password_reset_action(rid):
 
 # --- Client : chauffeurs proches ---------------------------------------------
 @app.get("/api/drivers/nearby")
-@auth_required("client", "admin")
+@auth_required("admin")   # les clients ne voient plus la liste des chauffeurs : ils envoient une demande et attendent
 def drivers_nearby():
     coords = get_coords(request.args)
     if not coords:
@@ -861,7 +895,8 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
     out = {
         "id": r["id"], "pickup_text": r["pickup_text"], "destination_text": r["destination_text"],
         "note": r["note"], "lat": r["lat"], "lng": r["lng"], "status": r["status"],
-        "vehicle_type": r["vehicle_type"], "client_name": r["client_name"], "age_min": minutes_ago(r["created_at"]),
+        "vehicle_type": r["vehicle_type"], "client_name": r["client_name"] if reveal else (r["client_name"].split() or ["Client"])[0],
+        "age_min": minutes_ago(r["created_at"]),
     }
     if dlat is not None:
         out["distance_km"] = round(haversine_km(dlat, dlng, r["lat"], r["lng"]), 2)
@@ -1412,6 +1447,71 @@ def admin_stats():
         "avg_rating": (lambda v: round(float(v), 1) if v is not None else None)(one("SELECT AVG(rating) FROM ride_requests WHERE rating IS NOT NULL")),
         "password_resets_open": one("SELECT COUNT(*) FROM password_resets WHERE status='open'"),
     })
+
+
+@app.get("/api/admin/online")
+@auth_required("admin")
+def admin_online():
+    """Qui a l'application ouverte à l'écran en ce moment (vu dans les 3 dernières minutes)."""
+    db = get_db()
+    since = ts(now() - timedelta(minutes=ONLINE_WINDOW_MIN))
+    rows = db.execute(
+        """SELECT u.id, u.role, u.name, u.phone, u.last_seen_at, d.vehicle_type, d.availability, d.approval
+           FROM users u LEFT JOIN drivers d ON d.user_id=u.id
+           WHERE u.role IN ('client','driver') AND u.is_blocked=0 AND u.last_seen_at>=?
+           ORDER BY u.last_seen_at DESC LIMIT 300""", (since,)).fetchall()
+    out = {"clients": [], "drivers": []}
+    for r in rows:
+        item = {"id": r["id"], "name": r["name"], "phone": r["phone"], "seen_min": minutes_ago(r["last_seen_at"])}
+        if r["role"] == "driver":
+            item.update(vehicle_type=r["vehicle_type"], availability=r["availability"], approval=r["approval"])
+            out["drivers"].append(item)
+        else:
+            out["clients"].append(item)
+    return jsonify(out)
+
+
+@app.get("/api/admin/requests")
+@auth_required("admin")
+def admin_requests():
+    """Demandes de course par état (annulées par défaut)."""
+    status = request.args.get("status", "cancelled")
+    if status not in ("cancelled", "expired", "completed", "open", "accepted", "all"):
+        status = "cancelled"
+    sql = """SELECT r.id, r.status, r.pickup_text, r.destination_text, r.note, r.vehicle_type, r.created_at, r.closed_at, r.accepted_at, r.rating,
+                    c.id AS client_id, c.name AS client_name, c.phone AS client_phone,
+                    d.name AS driver_name, d.phone AS driver_phone
+             FROM ride_requests r JOIN users c ON c.id=r.client_id LEFT JOIN users d ON d.id=r.driver_id"""
+    params = []
+    if status != "all":
+        sql += " WHERE r.status=?"
+        params.append(status)
+    sql += " ORDER BY r.id DESC LIMIT 100"
+    db = get_db()
+    expire_requests(db)
+    rows = db.execute(sql, params).fetchall()
+    counts = {k: db.execute("SELECT COUNT(*) FROM ride_requests WHERE status=?", (k,)).fetchone()[0]
+              for k in ("cancelled", "expired", "completed", "open")}
+    return jsonify({"requests": [dict(r) for r in rows], "counts": counts})
+
+
+@app.get("/api/admin/welcome")
+@auth_required("admin")
+def admin_get_welcome():
+    db = get_db()
+    return jsonify({"client": get_setting(db, "welcome_client"), "driver": get_setting(db, "welcome_driver")})
+
+
+@app.put("/api/admin/welcome")
+@auth_required("admin")
+def admin_set_welcome():
+    data = body()
+    db = get_db()
+    for role in ("client", "driver"):
+        if role in data:
+            set_setting(db, f"welcome_{role}", clean_text(data.get(role), 800))
+    db.commit()
+    return jsonify({"ok": True})
 
 
 @app.get("/api/admin/drivers")

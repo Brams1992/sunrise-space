@@ -384,7 +384,7 @@ function render() {
   state.tab = null;
   if (!state.user) return renderAuth();
   if (state.user.must_change_password) return renderForcedChange();
-  if (state.user.role === 'client') return renderShell('client', [['nearby', '🗺️', 'Autour de moi'], ['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
+  if (state.user.role === 'client') return renderShell('client', [['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin' && state.user.scope === 'validator') return renderShell('validator', [['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Inscrits'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
@@ -396,6 +396,7 @@ function renderShell(role, tabs) {
     <div class="shell ${role === 'admin' || role === 'validator' ? 'wide' : ''}">
       <header class="topbar">
         <div class="brand"><img src="/icon-192.png" alt="" width="30" height="30"><span>Sunrise Space</span></div>
+        ${role === 'admin' ? '<button class="logoutbtn" id="btn-top-logout" aria-label="Se déconnecter">Déconnexion</button>' : ''}
         <div class="who">${esc(state.user.name)}<br><span style="opacity:.7">${{ client: 'Client', driver: 'Chauffeur', admin: 'Administrateur', validator: 'Validateur' }[role]}</span></div>
       </header>
       <button class="annbar" id="annbar" hidden></button>
@@ -406,6 +407,8 @@ function renderShell(role, tabs) {
       ${tabs.map(([id, ic, label]) => `<button data-tab="${id}"><span class="ic" aria-hidden="true">${ic}${id === 'inbox' ? '<i class="dot" id="inbox-dot" hidden></i>' : ''}</span>${esc(label)}</button>`).join('')}
     </div></nav>`;
   $$('.bottomnav [data-tab]').forEach((b) => (b.onclick = () => openTab(role, b.dataset.tab)));
+  const tl = $('#btn-top-logout');
+  if (tl) tl.onclick = () => { if (confirm('Se déconnecter du compte administrateur ?')) logout(); };
   openTab(role, first);
   updatePushBar();
   clearInterval(state.unreadTimer);
@@ -446,7 +449,7 @@ function openTab(role, tab) {
   window.scrollTo(0, 0);
   updateBanner();
   const views = {
-    client: { nearby: clientNearby, request: clientRequest, inbox: userInbox, account: accountView },
+    client: { request: clientRequest, inbox: userInbox, account: accountView },
     driver: { home: driverHome, inbox: userInbox, account: accountView },
     admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, reports: adminReports, inbox: adminInbox },
     validator: { drivers: adminDrivers, users: validatorUsers, account: validatorAccount },
@@ -495,7 +498,7 @@ function renderAuth() {
         </form>
       </section>
       <section class="feat">
-        <div><span class="ic">📍</span><p><b>Chauffeurs disponibles autour de vous</b><br><span class="muted">Moto, taxi ou tricycle : voyez les plus proches en direct.</span></p></div>
+        <div><span class="ic">📍</span><p><b>Un chauffeur près de vous</b><br><span class="muted">Moto, taxi ou tricycle : envoyez votre demande, le premier chauffeur disponible l'accepte.</span></p></div>
         <div><span class="ic">📞</span><p><b>Appel ou WhatsApp direct</b><br><span class="muted">Vous vous arrangez avec le chauffeur, paiement en espèces.</span></p></div>
         <div><span class="ic">🛡️</span><p><b>Chauffeurs vérifiés</b><br><span class="muted">Chaque profil est contrôlé, et vous pouvez signaler un abus.</span></p></div>
         ${installButtonHTML()}
@@ -682,82 +685,6 @@ function openReport(targetId, targetName, requestId) {
 }
 
 /* ======================= CLIENT ======================= */
-async function clientNearby() {
-  $('#main').innerHTML = `
-    <section class="card">${posControlsHTML()}</section>
-    <div id="map" class="map" aria-label="Carte des véhicules disponibles"></div>
-    <div class="section-head"><h2>Chauffeurs disponibles</h2><button class="link" id="btn-refresh">Actualiser</button></div>
-    <div id="vf"></div>
-    <div id="drivers" class="list"></div>`;
-  bindPosControls();
-  setupMap('map');
-  let first = true, vf = state.wantType || '', lastList = [];
-
-  async function load() {
-    const box = $('#drivers');
-    if (!box) return;
-    if (!state.pos) { box.innerHTML = empty('📍', 'Indiquez votre position', 'Touchez « Me localiser » ou choisissez votre commune pour voir les chauffeurs autour de vous.'); return; }
-    try {
-      const r = await api(`/api/drivers/nearby?lat=${state.pos.lat}&lng=${state.pos.lng}`);
-      paint(r.drivers);
-    } catch (e) { if (e.status !== 401) box.innerHTML = empty('⚠️', 'Chargement impossible', e.message); }
-  }
-
-  function paint(all) {
-    lastList = all;
-    const box = $('#drivers');
-    const count = (t) => all.filter((d) => d.vehicle_type === t).length;
-    $('#vf').innerHTML = filterTabs([['', `Tous (${all.length})`], ...Object.entries(VEHICLES).map(([k, v]) => [k, `${v.icon} ${v.short} (${count(k)})`])], vf, 'v');
-    $$('#vf [data-v]').forEach((b) => (b.onclick = () => { vf = b.dataset.v; state.wantType = vf; first = true; paint(lastList); }));
-    const list = vf ? all.filter((d) => d.vehicle_type === vf) : all;
-    if (state.layers) {
-      state.layers.clearLayers();
-      list.forEach((d) => {
-        L.marker([d.lat, d.lng], { icon: L.divIcon({ className: 'pin', html: veh(d.vehicle_type).icon, iconSize: [34, 34], iconAnchor: [17, 17] }) })
-          .bindPopup(`<b>${esc(d.name)}</b><br>${esc(veh(d.vehicle_type).label)} · ${esc(d.plate)} · ${fmtDist(d.distance_km)}`).addTo(state.layers);
-      });
-      if (first && list.length && state.pos) {
-        state.map.fitBounds([[state.pos.lat, state.pos.lng], ...list.map((d) => [d.lat, d.lng])], { padding: [30, 30], maxZoom: 16 });
-      }
-    }
-    first = false;
-    if (!list.length) {
-      box.innerHTML = empty('🌅', vf ? `Aucun ${veh(vf).label.toLowerCase()} disponible pour le moment` : 'Aucun chauffeur disponible pour le moment',
-        vf && all.length ? 'Essayez un autre type de véhicule, ou faites une demande.' : "Aucun chauffeur disponible dans 15 km. Faites une demande : les chauffeurs proches seront prévenus.") +
-        '<button class="btn btn-block" id="go-request">🛵 Faire une demande</button>';
-      $('#go-request').onclick = () => openTab('client', 'request');
-      return;
-    }
-    box.innerHTML = list.map((d) => `
-      <article class="card driver">
-        <div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div>
-        <div class="grow">
-          <h3>${esc(d.name)}</h3>
-          <p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p>
-          <p class="meta"><span class="chip ok">● Disponible</span><b>${fmtDist(d.distance_km)}</b><span class="muted">· ${esc(d.commune)}</span></p>
-          <p class="tiny muted">Position ${esc(ago(d.updated_min_ago))}</p>
-        </div>
-        <div class="actions">
-          <a class="btn btn-sm" href="tel:+225${esc(d.phone)}">📞 Appeler</a>
-          <a class="btn btn-sm btn-wa" target="_blank" rel="noopener" href="${waLink(d.whatsapp)}">WhatsApp</a>
-          <button class="btn btn-sm btn-ghost" data-report="${d.id}" data-name="${esc(d.name)}">⚑ Signaler</button>
-        </div>
-      </article>`).join('');
-  }
-
-  $('#drivers').addEventListener('click', (e) => {
-    const b = e.target.closest('[data-report]');
-    if (b) openReport(Number(b.dataset.report), b.dataset.name);
-  });
-  $('#btn-refresh').onclick = load;
-  state.onPos = () => { first = true; load(); };
-  every(10000, load);
-  if (!state.pos) {
-    try { setPos({ ...(await getPosition()), source: 'gps' }); if (state.map) state.map.setView([state.pos.lat, state.pos.lng], 14); }
-    catch (e) { toast(e.message, 'bad'); load(); }
-  } else load();
-}
-
 function empty(icon, title, text) {
   return `<div class="empty"><div class="big">${icon}</div><h3>${esc(title)}</h3><p>${esc(text)}</p></div>`;
 }
@@ -794,35 +721,6 @@ async function clientRequest() {
     }
   }
 
-  /* Indique, à côté de chaque type, combien de chauffeurs sont disponibles près du client. */
-  async function fillVehicleCounts() {
-    const sel = $('#vtype'), hint = $('#vhint');
-    if (!sel || !state.pos) return;
-    try {
-      const { drivers } = await api(`/api/drivers/nearby?lat=${state.pos.lat}&lng=${state.pos.lng}`);
-      const n = (t) => drivers.filter((d) => d.vehicle_type === t).length;
-      Array.from(sel.options).forEach((o) => {
-        const count = o.value === 'any' ? drivers.length : n(o.value);
-        const base = o.value === 'any' ? 'Peu importe (le plus proche)' : `${veh(o.value).icon} ${veh(o.value).label}`;
-        o.textContent = `${base} · ${count} disponible${count > 1 ? 's' : ''}`;
-      });
-      const show = () => {
-        const c = sel.value === 'any' ? drivers.length : n(sel.value);
-        hint.textContent = c ? '' : 'Aucun chauffeur de ce type n\'est disponible près de vous pour le moment. Vous pouvez quand même envoyer la demande : elle reste ouverte 30 minutes.';
-      };
-      sel.onchange = show; show();
-    } catch { /* l'indication est facultative */ }
-  }
-
-  function driverBlock(d) {
-    return `<div class="card flat">
-      <div class="row"><div class="avatar" aria-hidden="true">${veh(d.vehicle_type).icon}</div><div class="grow"><h3>${esc(d.name)}</h3><p class="tiny muted">${starsText(d.rating_avg, d.rating_count)}</p><p class="muted">${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</p></div></div>
-      <div class="row" style="margin-top:10px">
-        <a class="btn btn-sm grow" href="tel:+225${esc(d.phone)}">📞 Appeler</a>
-        <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(d.whatsapp, 'Bonjour, j\'ai fait une demande sur Sunrise Space.')}">WhatsApp</a>
-      </div></div>`;
-  }
-
   function paint(r) {
     const box = $('#reqbox');
     const key = r ? `${r.id}:${r.status}` : 'none';
@@ -837,7 +735,6 @@ async function clientRequest() {
       box.innerHTML = formHTML();
       $('#reqform').onsubmit = submit;
       $('#btn-redetect').onclick = detectPosition;
-      fillVehicleCounts();
       if (!freshGps()) detectPosition();
       return;
     }
@@ -1200,7 +1097,7 @@ async function driverHome() {
     if (d.approval === 'rejected') banner = `<div class="banner bad"><b>Profil refusé.</b> ${esc(d.approval_note || 'Contactez le support Sunrise Space.')}</div>`;
     const canToggle = d.approval === 'approved' && d.availability !== 'busy';
     const label = { available: 'Disponible', busy: 'Course en cours', unavailable: 'Indisponible' }[d.availability];
-    const hint = { available: 'Les clients proches peuvent vous voir et vous appeler.', busy: 'Terminez votre course pour redevenir disponible.', unavailable: 'Vous n\'apparaissez pas sur la carte des clients.' }[d.availability];
+    const hint = { available: 'Vous recevez les demandes des clients proches.', busy: 'Terminez votre course pour redevenir disponible.', unavailable: 'Vous ne recevez aucune demande.' }[d.availability];
     let html = `${banner}<section class="card statuscard ${d.availability}">
       <div class="grow"><p class="tiny muted">Mon statut</p><h2>${label}</h2><p class="muted tiny">${hint}</p><p style="margin-top:6px" id="locbadge">${d.availability === 'unavailable' ? '' : locBadge()}</p></div>
       <button class="switch ${d.availability === 'available' ? 'on' : ''}" id="btn-toggle" role="switch" aria-checked="${d.availability === 'available'}" aria-label="Je suis disponible" ${canToggle ? '' : 'disabled'}><span></span></button></section>`;
@@ -1222,7 +1119,7 @@ async function driverHome() {
       html += '<div class="section-head"><h2>Demandes près de vous</h2></div>';
       if (d.availability !== 'available') html += empty('😴', 'Vous êtes indisponible', 'Passez « Disponible » pour recevoir les demandes des clients proches.');
       else if (!requests.length) html += empty('🌅', 'Aucune demande pour le moment', 'Restez disponible : les nouvelles demandes apparaissent ici automatiquement.');
-      else html += '<div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
+      else html += '<p class="muted tiny">🔒 Le numéro du client s\'affiche après avoir accepté la course.</p><div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
           <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span>${r.vehicle_type && r.vehicle_type !== 'any' ? `<span class="chip">Demande : ${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).short)}</span>` : ''}</h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
           <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
@@ -1359,7 +1256,7 @@ function confirmRestore(backup, info) {
 }
 
 async function adminStats() {
-  $('#main').innerHTML = `<div id="st" class="stack"></div>
+  $('#main').innerHTML = `<div id="st" class="stack"></div><div id="online"></div><div id="reqs"></div>
     <section class="card stack"><h3>💾 Sauvegarde</h3>
       <p class="muted">Téléchargez une copie de toutes les données (comptes, courses, messages…). Ce fichier contient des informations personnelles : gardez-le privé.</p>
       <button class="btn btn-ghost btn-block" id="bk">Télécharger une sauvegarde</button>
@@ -1388,6 +1285,31 @@ async function adminStats() {
   $('#bk').onclick = (e) => downloadBackup(e.currentTarget);
   $('#rs').onclick = () => $('#rsfile').click();
   $('#rsfile').onchange = (e) => pickRestoreFile(e.currentTarget);
+  async function loadOnline() {
+    try {
+      const o = await api('/api/admin/online');
+      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span></li>`;
+      const dst = { available: ' · 🟢 disponible', busy: ' · 🔴 en course', unavailable: ' · ⚪ indisponible' };
+      $('#online').innerHTML = `<section class="card stack"><h3>🟢 En ligne maintenant</h3>
+        <p class="muted tiny">Application ouverte à l'écran dans les 3 dernières minutes.</p>
+        <h4>Chauffeurs (${o.drivers.length})</h4>${o.drivers.length ? `<ul class="onlist">${o.drivers.map((u) => row(u, ` · ${veh(u.vehicle_type).icon}${dst[u.availability] || ''}`)).join('')}</ul>` : '<p class="muted">Aucun chauffeur en ligne.</p>'}
+        <h4>Clients (${o.clients.length})</h4>${o.clients.length ? `<ul class="onlist">${o.clients.map((u) => row(u)).join('')}</ul>` : '<p class="muted">Aucun client en ligne.</p>'}</section>`;
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  let rq = 'cancelled';
+  async function loadReqs() {
+    try {
+      const { requests, counts } = await api('/api/admin/requests?status=' + rq);
+      const lab = { cancelled: 'Annulée par le client', expired: 'Expirée (personne n\'a accepté)', completed: 'Terminée', open: 'En attente' };
+      $('#reqs').innerHTML = `<section class="card stack"><h3>📋 Demandes de course</h3>
+        <div id="rqf">${filterTabs([['cancelled', `Annulées (${counts.cancelled})`], ['expired', `Expirées (${counts.expired})`], ['completed', `Terminées (${counts.completed})`], ['open', `En attente (${counts.open})`]], rq, 'q')}</div>
+        ${requests.length ? requests.map((r) => `<article class="card flat"><p><b>${esc(r.client_name)}</b> · ${esc(fmtPhone(r.client_phone))}</p>
+          <p class="muted">${esc(r.pickup_text || 'Position GPS')} → ${esc(r.destination_text || '—')}${r.vehicle_type && r.vehicle_type !== 'any' ? ' · ' + veh(r.vehicle_type).icon : ''}</p>
+          <p class="muted tiny">${lab[r.status] || r.status} · demandée ${fmtWhen(r.created_at)}${r.closed_at ? ' · fermée ' + fmtWhen(r.closed_at) : ''}${r.driver_name ? ' · chauffeur : ' + esc(r.driver_name) : ''}</p></article>`).join('') : '<p class="muted">Rien dans cette catégorie.</p>'}</section>`;
+      $$('#rqf [data-q]').forEach((b) => (b.onclick = () => { rq = b.dataset.q; loadReqs(); }));
+    } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
+  }
+  loadOnline(); loadReqs(); every(20000, loadOnline);
   async function load() {
     try {
       const s = await api('/api/admin/stats');
@@ -1690,7 +1612,7 @@ async function adminInbox() {
   let view = 'conv', thread = state.openThread || null;
   state.openThread = null;
   $('#main').innerHTML = '<h2>Messages</h2><div id="ft"></div><div id="box" class="stack"></div>';
-  const tabs = () => { $('#ft').innerHTML = thread ? '' : filterTabs([['conv', 'Boîte de réception'], ['ann', 'Annonces']], view, 'v'); $$('#ft [data-v]').forEach((b) => (b.onclick = () => { view = b.dataset.v; draw(); })); };
+  const tabs = () => { $('#ft').innerHTML = thread ? '' : filterTabs([['conv', 'Boîte de réception'], ['ann', 'Annonces'], ['wel', 'Bienvenue']], view, 'v'); $$('#ft [data-v]').forEach((b) => (b.onclick = () => { view = b.dataset.v; draw(); })); };
 
   async function drawConversations() {
     try {
@@ -1727,6 +1649,22 @@ async function adminInbox() {
       finally { $('#ms').disabled = false; }
     };
     await load(); every(10000, load);
+  }
+
+  async function drawWelcome() {
+    let w = { client: '', driver: '' };
+    try { w = await api('/api/admin/welcome'); } catch (e) { toast(e.message, 'bad'); }
+    $('#box').innerHTML = `<section class="card stack"><h3>👋 Message de bienvenue automatique</h3>
+      <p class="muted">Envoyé dans la messagerie de chaque <b>nouvel</b> inscrit, dès la création de son compte. Laissez vide pour ne rien envoyer. Écrivez <b>{prenom}</b> pour insérer son prénom.</p>
+      <form id="wf" class="stack">
+        <label>Aux nouveaux clients<textarea id="wc" maxlength="800" rows="5" placeholder="Ex. Bienvenue {prenom} sur Sunrise Space ! Envoyez votre demande de course : un chauffeur proche vous répondra.">${esc(w.client)}</textarea></label>
+        <label>Aux nouveaux chauffeurs<textarea id="wd" maxlength="800" rows="5" placeholder="Ex. Bienvenue {prenom} ! Votre profil sera vérifié par l'équipe avant de recevoir des demandes.">${esc(w.driver)}</textarea></label>
+        <button class="btn btn-primary btn-block" id="wsave">Enregistrer</button></form></section>`;
+    $('#wf').onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api('/api/admin/welcome', { method: 'PUT', body: { client: $('#wc').value, driver: $('#wd').value } }); toast('Message de bienvenue enregistré ✅'); }
+      catch (err) { toast(err.message, 'bad'); }
+    };
   }
 
   async function drawAnnouncements() {
@@ -1767,6 +1705,7 @@ async function adminInbox() {
   function draw() {
     clearTimers(); tabs();
     if (thread) return drawThread();
+    if (view === 'wel') return drawWelcome();
     if (view === 'ann') return drawAnnouncements();
     drawConversations(); every(15000, drawConversations);
   }

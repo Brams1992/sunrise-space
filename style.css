@@ -241,3 +241,9 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 
 .alarmbar { position: fixed; left: 12px; right: 12px; top: 12px; z-index: 80; padding: 16px; border-radius: 14px; text-align: center; font-weight: 800; font-size: 1.05rem; color: #fff; background: #d9480f; box-shadow: 0 6px 24px rgba(0,0,0,.35); animation: alarmblink .6s steps(2) infinite; }
 @keyframes alarmblink { 50% { background: #ff7a1a; } }
+
+.logoutbtn { background: rgba(255,255,255,.14); color: #fff; border: 1px solid rgba(255,255,255,.35); border-radius: 999px; padding: 6px 12px; font-size: .78rem; font-weight: 700; margin-left: auto; margin-right: 10px; cursor: pointer; }
+.onlist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.onlist li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dotlive { width: 10px; height: 10px; border-radius: 50%; background: #2ecc71; flex: none; box-shadow: 0 0 0 3px rgba(46,204,113,.25); }
+.logoutbtn + .who { margin-left: 0; }
