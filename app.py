@@ -16,7 +16,7 @@ import base64
 import zlib
 import urllib.request
 import urllib.error
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
@@ -37,6 +37,7 @@ else:
 # --- Réglages -----------------------------------------------------------------
 PUSH_DRIVER_MAX_AGE_H = 12     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 12 h
 GHOST_AFTER_H = 2             # « Disponible » sans position depuis 2 h : repassé automatiquement en indisponible
+MAX_TRIP_KM = 300               # destination à plus de 300 km du départ : refusée
 ONLINE_WINDOW_MIN = 3          # « en ligne » = application ouverte à l'écran dans les 3 dernières minutes
 NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
 NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
@@ -152,7 +153,8 @@ CREATE TABLE IF NOT EXISTS ride_requests(
   vehicle_type TEXT NOT NULL DEFAULT 'any',
   status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','accepted','completed','cancelled','expired')),
   created_at TEXT NOT NULL, accepted_at TEXT, closed_at TEXT,
-  rating INTEGER, rating_comment TEXT
+  rating INTEGER, rating_comment TEXT,
+  dest_lat REAL, dest_lng REAL
 );
 CREATE TABLE IF NOT EXISTS reports(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -314,6 +316,8 @@ def init_db(create_admin=True):
         ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
         ensure_column(db, "ride_requests", "rating", "INTEGER")
         ensure_column(db, "ride_requests", "rating_comment", "TEXT")
+        ensure_column(db, "ride_requests", "dest_lat", "REAL")
+        ensure_column(db, "ride_requests", "dest_lng", "REAL")
         if create_admin:
             ensure_admin(db)
     finally:
@@ -897,6 +901,8 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
         "note": r["note"], "lat": r["lat"], "lng": r["lng"], "status": r["status"],
         "vehicle_type": r["vehicle_type"], "client_name": r["client_name"] if reveal else (r["client_name"].split() or ["Client"])[0],
         "age_min": minutes_ago(r["created_at"]),
+        "dest_lat": r["dest_lat"], "dest_lng": r["dest_lng"],
+        "trip_km": round(haversine_km(r["lat"], r["lng"], r["dest_lat"], r["dest_lng"]), 1) if r["dest_lat"] is not None else None,
     }
     if dlat is not None:
         out["distance_km"] = round(haversine_km(dlat, dlng, r["lat"], r["lng"]), 2)
@@ -1112,7 +1118,7 @@ def push_unsubscribe():
     return jsonify({"ok": True})
 
 
-def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup):
+def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup, trip_km=None):
     """Nouvelle demande : on prévient les chauffeurs disponibles à moins de 15 km de leur dernière position connue."""
     fresh = ts(now() - timedelta(hours=PUSH_DRIVER_MAX_AGE_H))
     rows = db.execute(
@@ -1124,7 +1130,8 @@ def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup):
     near = [(km, uid) for km, uid in near if km <= NEARBY_RADIUS_KM][:30]
     for km, uid in near:
         where = f" · {pickup}" if pickup else ""
-        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}", tag=f"req-{rid}", urgent=True)
+        trip = f" · trajet ≈ {trip_km:.1f} km" if trip_km is not None else ""
+        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}{trip}", tag=f"req-{rid}", urgent=True)
     if near and PUSH_REMINDER_DELAYS:
         threading.Thread(target=_remind_drivers, args=(rid, [u for _, u in near]), daemon=True).start()
     return len(near)
@@ -1175,6 +1182,7 @@ def serialize_request_for_client(db, r):
         "destination_text": r["destination_text"], "note": r["note"],
         "lat": r["lat"], "lng": r["lng"], "age_min": minutes_ago(r["created_at"]),
         "vehicle_type": r["vehicle_type"], "driver": None, "rating": r["rating"],
+        "dest_lat": r["dest_lat"], "dest_lng": r["dest_lng"],
     }
     if r["driver_id"] and r["status"] in ("accepted", "completed"):
         d = db.execute(
@@ -1204,6 +1212,13 @@ def create_request():
     wanted = data.get("vehicle_type") or "any"
     if wanted != "any" and wanted not in VEHICLE_TYPES:
         return err("Type de véhicule invalide.")
+    dest = None                      # point d'arrivée facultatif (choisi sur la carte ou dans la recherche)
+    if data.get("dest_lat") is not None or data.get("dest_lng") is not None:
+        dest = get_coords({"lat": data.get("dest_lat"), "lng": data.get("dest_lng")})
+        if not dest:
+            return err("Destination invalide.")
+        if haversine_km(coords[0], coords[1], dest[0], dest[1]) > MAX_TRIP_KM:
+            return err(f"Destination trop éloignée (plus de {MAX_TRIP_KM} km).")
     db = get_db()
     expire_requests(db)
     sweep_ghost_drivers(db)
@@ -1213,18 +1228,64 @@ def create_request():
     if active:
         return err("Vous avez déjà une demande en cours.", 409)
     new_id = db.insert(
-        """INSERT INTO ride_requests(client_id,lat,lng,pickup_text,destination_text,note,vehicle_type,created_at)
-           VALUES(?,?,?,?,?,?,?,?)""",
+        """INSERT INTO ride_requests(client_id,lat,lng,pickup_text,destination_text,note,vehicle_type,created_at,dest_lat,dest_lng)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (g.user["id"], coords[0], coords[1], clean(data.get("pickup_text"), 120),
-         clean(data.get("destination_text"), 120), clean(data.get("note"), 200), wanted, ts()),
+         clean(data.get("destination_text"), 120), clean(data.get("note"), 200), wanted, ts(),
+         dest[0] if dest else None, dest[1] if dest else None),
     )
     db.commit()
     r = db.execute("SELECT * FROM ride_requests WHERE id=?", (new_id,)).fetchone()
     try:
-        notify_drivers_of_request(db, new_id, coords[0], coords[1], wanted, clean(data.get("pickup_text"), 60))
+        notify_drivers_of_request(db, new_id, coords[0], coords[1], wanted, clean(data.get("pickup_text"), 60),
+                                  haversine_km(coords[0], coords[1], dest[0], dest[1]) if dest else None)
     except Exception:
         app.logger.exception("push demande")
     return jsonify({"request": serialize_request_for_client(db, r)}), 201
+
+
+_geo_cache = {}
+_geo_last = [0.0]
+
+
+def _nominatim(q, lat, lng):
+    """Recherche de lieux (OpenStreetMap / Nominatim), limitée à la Côte d'Ivoire, autour de la position du client."""
+    d = 0.5
+    params = {"format": "jsonv2", "q": q, "countrycodes": "ci", "limit": "6", "accept-language": "fr"}
+    if lat is not None:
+        params.update(viewbox=f"{lng - d},{lat + d},{lng + d},{lat - d}")
+    url = "https://nominatim.openstreetmap.org/search?" + urlencode(params)
+    req = urllib.request.Request(url, headers={"User-Agent": "SunriseSpace/1.0 (recherche de destination)"})
+    with urllib.request.urlopen(req, timeout=6) as resp:
+        data = json.loads(resp.read().decode())
+    return [{"label": ", ".join(x.get("display_name", "").split(", ")[:3]), "lat": float(x["lat"]), "lng": float(x["lon"])} for x in data]
+
+
+@app.get("/api/geocode")
+@auth_required("client")
+def geocode():
+    q = clean(request.args.get("q"), 80)
+    if len(q) < 3:
+        return jsonify({"results": []})
+    try:
+        lat, lng = float(request.args.get("lat")), float(request.args.get("lng"))
+    except (TypeError, ValueError):
+        lat = lng = None
+    key = (q.lower(), round(lat, 1) if lat is not None else None, round(lng, 1) if lng is not None else None)
+    hit = _geo_cache.get(key)
+    if hit and time.time() - hit[0] < 3600:
+        return jsonify({"results": hit[1]})
+    if time.time() - _geo_last[0] < 1.0:          # règle d'usage de Nominatim : 1 requête par seconde au plus
+        return jsonify({"results": [], "busy": True})
+    _geo_last[0] = time.time()
+    try:
+        results = _nominatim(q, lat, lng)
+    except Exception:
+        return jsonify({"results": [], "unavailable": True})
+    if len(_geo_cache) > 500:
+        _geo_cache.clear()
+    _geo_cache[key] = (time.time(), results)
+    return jsonify({"results": results})
 
 
 @app.get("/api/requests/current")

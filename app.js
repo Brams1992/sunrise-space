@@ -691,7 +691,71 @@ function empty(icon, title, text) {
 
 async function clientRequest() {
   $('#main').innerHTML = '<div id="reqbox"></div><div id="hist" class="stack"></div>';
-  let lastKey = null;
+  let lastKey = null, destPick = null;   // destPick : point d'arrivée choisi (recherche ou carte)
+
+  function destNote() {
+    const n = $('#dnote');
+    if (!n) return;
+    const km = destPick && state.pos ? distKm(state.pos, destPick) : null;
+    n.textContent = destPick
+      ? `✅ Destination placée sur la carte${km != null ? ` · environ ${km.toFixed(1).replace('.', ',')} km` : ''}. Le chauffeur verra la distance et l'itinéraire.`
+      : 'Astuce : choisissez un lieu proposé ou placez-le sur la carte, le chauffeur verra la distance et l\'itinéraire.';
+  }
+
+  function bindDestination() {
+    const inp = $('#dest'), box = $('#dsug');
+    if (!inp) return;
+    let timer;
+    inp.addEventListener('input', () => {
+      destPick = null; destNote();
+      clearTimeout(timer);
+      const q = inp.value.trim();
+      if (q.length < 3) { box.hidden = true; return; }
+      timer = setTimeout(async () => {
+        try {
+          const p = state.pos;
+          const r = await api(`/api/geocode?q=${encodeURIComponent(q)}${p ? `&lat=${p.lat}&lng=${p.lng}` : ''}`);
+          if (inp.value.trim() !== q) return;
+          box._res = r.results || [];
+          box.innerHTML = box._res.map((x, i) => `<button type="button" class="sug" data-i="${i}">📍 ${esc(x.label)}</button>`).join('');
+          box.hidden = !box._res.length;
+        } catch { /* la saisie libre reste possible */ }
+      }, 600);
+    });
+    box.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-i]');
+      if (!b) return;
+      const x = box._res[Number(b.dataset.i)];
+      inp.value = x.label.slice(0, 120); destPick = { lat: x.lat, lng: x.lng }; box.hidden = true; destNote();
+    });
+    $('#btn-pick').onclick = pickOnMap;
+    destNote();
+  }
+
+  function pickOnMap() {
+    if (!window.L) { toast('La carte est indisponible pour le moment. Tapez le nom du lieu.', 'bad'); return; }
+    const start = destPick || state.pos || { lat: 5.36, lng: -4.0083 };
+    const m = modal(`<h2>Choisir la destination</h2><p class="muted tiny">Touchez la carte à l'endroit où vous allez, puis confirmez.</p>
+      <div id="pickmap" class="map" style="height:52vh"></div>
+      <div class="row"><button class="btn btn-ghost grow" id="pk-cancel">Annuler</button><button class="btn grow" id="pk-ok" disabled>Confirmer ce lieu</button></div>`);
+    const map = L.map('pickmap').setView([start.lat, start.lng], destPick ? 16 : 14);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+    setTimeout(() => map.invalidateSize(), 200);
+    let mk = null, pick = destPick;
+    const put = (ll) => { pick = { lat: ll.lat, lng: ll.lng }; if (mk) mk.setLatLng(ll); else mk = L.marker(ll, { icon: pinIcon('🏁') }).addTo(map); $('#pk-ok', m.el).disabled = false; };
+    if (destPick) put(destPick);
+    if (state.pos) L.marker([state.pos.lat, state.pos.lng], { icon: pinIcon('🙋'), interactive: false }).addTo(map);
+    map.on('click', (e) => put(e.latlng));
+    const done = () => { try { map.remove(); } catch { /* rien */ } m.close(); };
+    $('#pk-cancel', m.el).onclick = done;
+    $('#pk-ok', m.el).onclick = () => {
+      destPick = pick; done();
+      const inp = $('#dest');
+      if (inp && inp.value.trim().length < 2) inp.value = 'Lieu choisi sur la carte';
+      const box = $('#dsug'); if (box) box.hidden = true;
+      destNote();
+    };
+  }
 
   function freshGps() { return state.pos && state.pos.source === 'gps' && Date.now() - (state.pos.at || 0) < 60000; }
 
@@ -702,7 +766,10 @@ async function clientRequest() {
       <div class="posline" id="posline">${freshGps() ? posLineHTML() : '<span class="chip">📡 Détection de votre position…</span>'}</div>
       <button type="button" class="link" id="btn-redetect" style="justify-self:start">↻ Actualiser ma position</button>
       <form id="reqform" class="form" style="margin-top:0">
-        <label>Où allez-vous ?<input name="dest" required maxlength="120" autocomplete="off" placeholder="Ex. Marché de Cocody"></label>
+        <label>Où allez-vous ?<input name="dest" id="dest" required maxlength="120" autocomplete="off" placeholder="Ex. Marché de Cocody"></label>
+        <div class="sugs" id="dsug" hidden></div>
+        <button type="button" class="btn btn-ghost btn-sm" id="btn-pick" style="justify-self:start">📍 Choisir la destination sur la carte</button>
+        <p class="tiny muted" id="dnote"></p>
         <label>Quel véhicule ?<select name="vtype" id="vtype"><option value="any">Peu importe (le plus proche)</option>${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}"${state.wantType === k ? ' selected' : ''}>${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
         <p class="tiny muted" id="vhint"></p>
         <p class="banner bad" id="req-err" role="alert" hidden></p>
@@ -733,8 +800,10 @@ async function clientRequest() {
     destroyMap();
     if (!r) {
       box.innerHTML = formHTML();
+      destPick = null;
       $('#reqform').onsubmit = submit;
       $('#btn-redetect').onclick = detectPosition;
+      bindDestination();
       if (!freshGps()) detectPosition();
       return;
     }
@@ -783,7 +852,7 @@ async function clientRequest() {
       if (p.accuracy > 150 && !confirm(`Votre position est approximative (±${p.accuracy} m). Le chauffeur risque de ne pas vous trouver. Envoyer quand même ?`)) {
         throw new Error("Demande non envoyée. Sortez à l'air libre, touchez « Actualiser ma position », puis réessayez.");
       }
-      await api('/api/requests', { method: 'POST', body: { lat: p.lat, lng: p.lng, accuracy: p.accuracy, pickup_text: '', destination_text: dest, note: '', vehicle_type: f.vtype.value } });
+      await api('/api/requests', { method: 'POST', body: { lat: p.lat, lng: p.lng, accuracy: p.accuracy, pickup_text: '', destination_text: dest, note: '', vehicle_type: f.vtype.value, ...(destPick ? { dest_lat: destPick.lat, dest_lng: destPick.lng } : {}) } });
       state.wantType = f.vtype.value === 'any' ? '' : f.vtype.value;
       toast('Demande envoyée !'); lastKey = null; load();
     } catch (e) { err.textContent = e.message; err.hidden = false; }
@@ -879,14 +948,14 @@ function locBadge() {
 
 /* ---------- Cartes du chauffeur : client + itinéraire ---------- */
 const OSRM_URL = 'https://router.project-osrm.org/route/v1/driving';
-const jobMap = { job: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
+const jobMap = { job: null, cm: null, dm: null, dst: null, trip: null, tripLine: null, phase: 'pickup', line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
 const reqMap = { dm: null };
 const cliMap = { req: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false };
 
 function destroyMap() {
   if (state.map) { try { state.map.remove(); } catch { /* rien */ } }
   state.map = null; state.layers = null; state.meMarker = null; state.accCircle = null;
-  Object.assign(jobMap, { job: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
+  Object.assign(jobMap, { job: null, cm: null, dm: null, dst: null, trip: null, tripLine: null, phase: 'pickup', line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
   reqMap.dm = null;
   Object.assign(cliMap, { req: null, cm: null, dm: null, line: null, lastFrom: null, lastAt: 0, busy: false, fitted: false });
 }
@@ -925,47 +994,106 @@ function newMap(elId) {
   return map;
 }
 
+const hasDest = (job) => job && job.dest_lat != null && job.dest_lng != null;
+const kmFr = (km) => km.toFixed(1).replace('.', ',');
+
+/* Cible actuelle de la navigation : le client (étape 1) ou la destination (étape 2). */
+function jobTarget() {
+  const job = jobMap.job;
+  if (hasDest(job) && jobMap.phase === 'dest') return { lat: job.dest_lat, lng: job.dest_lng, dest: true };
+  return { lat: job.lat, lng: job.lng, dest: false };
+}
+
+function updateNavLinks() {
+  const job = jobMap.job;
+  if (!job) return;
+  const t = jobTarget();
+  const la = $('#lnk-apple'), lg = $('#lnk-google'), nt = $('#navtarget');
+  if (la) la.href = appleLink(t.lat, t.lng);
+  if (lg) lg.href = mapsLink(t.lat, t.lng);
+  if (nt) nt.textContent = t.dest ? '🏁 Navigation vers : la destination' : '🙋 Navigation vers : le client';
+  $$('#phaseseg [data-ph]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.ph === (t.dest ? 'dest' : 'pickup'))));
+}
+
+function setPhase(ph) {
+  const job = jobMap.job;
+  if (!job) return;
+  jobMap.phase = hasDest(job) && ph === 'dest' ? 'dest' : 'pickup';
+  try { localStorage.setItem('ss_phase_' + job.id, jobMap.phase); } catch { /* rien */ }
+  jobMap.fitted = false; jobMap.lastFrom = null;
+  updateNavLinks();
+  refreshJobRoute(true);
+}
+
+function showTrip() {
+  const el = $('#jobtrip'), job = jobMap.job;
+  if (!el || !hasDest(job)) return;
+  const tr = jobMap.trip;
+  el.innerHTML = tr
+    ? `🏁 Trajet du client : <b>${kmFr(tr.km)} km</b> · environ <b>${tr.min} min</b> par la route`
+    : job.trip_km != null ? `🏁 Trajet du client : environ <b>${kmFr(job.trip_km)} km</b> <span class="tiny">(à vol d'oiseau)</span>` : '';
+}
+
 function initJobMap(job) {
   const el = $('#jobmap');
   if (!el) return;
   jobMap.job = job;
+  let ph = 'pickup';
+  try { ph = localStorage.getItem('ss_phase_' + job.id) || 'pickup'; } catch { /* rien */ }
+  jobMap.phase = hasDest(job) && ph === 'dest' ? 'dest' : 'pickup';
+  updateNavLinks();
+  showTrip();
   if (!window.L) {
     el.innerHTML = '<div class="map-fallback">Carte indisponible. Utilisez les boutons Plans ou Google Maps.</div>';
-    const me = myPos();
-    setEta(me ? `À vol d'oiseau : <b>${fmtDist(distKm(me, job))}</b>` : '');
+    refreshJobRoute(true);
     return;
   }
   const map = newMap('jobmap').setView([job.lat, job.lng], 15);
   jobMap.cm = L.marker([job.lat, job.lng], { icon: pinIcon('🙋'), zIndexOffset: 900 }).bindPopup(`Client : ${esc(job.client_name)}`).addTo(map);
+  if (hasDest(job)) {
+    jobMap.dst = L.marker([job.dest_lat, job.dest_lng], { icon: pinIcon('🏁'), zIndexOffset: 800 }).bindPopup(`Destination : ${esc(job.destination_text || '')}`).addTo(map);
+    fetchRoute({ lat: job.lat, lng: job.lng }, { lat: job.dest_lat, lng: job.dest_lng }).then((r) => {   // trajet du client (une seule fois)
+      if (state.map !== map || !r) return;
+      jobMap.trip = r; showTrip();
+      jobMap.tripLine = L.polyline(r.coords, { color: '#1E6CFF', weight: 4, opacity: 0.55, dashArray: '2 8' }).addTo(map);
+    });
+  }
   refreshJobRoute(true);
 }
 
 async function refreshJobRoute(force) {
   const job = jobMap.job, map = state.map;
-  if (!job || !map || !window.L) return;
+  if (!job) return;
   const me = myPos();
+  if (!window.L || !map) {   // sans carte : distance à vol d'oiseau vers la cible
+    if (me) { const t = jobTarget(); setEta(`${t.dest ? '🏁 Vers la destination' : '🛵 Vers le client'} : <b>${fmtDist(distKm(me, t))}</b> à vol d'oiseau`); }
+    return;
+  }
   if (!me) { setEta('En attente de votre position GPS…'); return; }
+  const tgt = jobTarget();
   if (jobMap.dm) jobMap.dm.setLatLng([me.lat, me.lng]);
   else jobMap.dm = L.marker([me.lat, me.lng], { icon: pinIcon(veh(state.driver && state.driver.vehicle_type).icon), zIndexOffset: 1000 }).addTo(map);
-  if (distKm(me, job) * 1000 < 30) {  // déjà sur place : pas de ligne à tracer
+  if (distKm(me, tgt) * 1000 < 30) {  // déjà sur place : pas de ligne à tracer
     if (jobMap.line) { map.removeLayer(jobMap.line); jobMap.line = null; }
-    setEta('📍 Vous êtes <b>au point de rendez-vous</b>');
+    setEta(tgt.dest ? '🏁 Vous êtes <b>arrivé à la destination</b>' : '📍 Vous êtes <b>au point de rendez-vous</b>');
     return;
   }
   const moved = jobMap.lastFrom ? distKm(jobMap.lastFrom, me) * 1000 : Infinity;
   if (!force && moved < 80 && Date.now() - jobMap.lastAt < 45000) return;
   if (jobMap.busy) return;
   jobMap.busy = true; jobMap.lastFrom = me; jobMap.lastAt = Date.now();
-  const route = await fetchRoute(me, job);
+  const route = await fetchRoute(me, tgt);
   jobMap.busy = false;
   if (state.map !== map) return;  // la carte a été remplacée entre-temps
+  if (jobTarget().dest !== tgt.dest) return refreshJobRoute(true);   // le chauffeur a changé d'étape pendant le calcul
   if (jobMap.line) map.removeLayer(jobMap.line);
-  const pts = route ? route.coords : [[me.lat, me.lng], [job.lat, job.lng]];
-  jobMap.line = L.polyline(pts, { color: '#FF7A1A', weight: 5, opacity: 0.9, dashArray: route ? null : '8 8' }).addTo(map);
+  const pts = route ? route.coords : [[me.lat, me.lng], [tgt.lat, tgt.lng]];
+  jobMap.line = L.polyline(pts, { color: tgt.dest ? '#1E9E5A' : '#FF7A1A', weight: 5, opacity: 0.9, dashArray: route ? null : '8 8' }).addTo(map);
   if (!jobMap.fitted) { jobMap.fitted = true; map.fitBounds(L.latLngBounds(pts).pad(0.2), { maxZoom: 17 }); }
+  const what = tgt.dest ? '🏁 Vers la destination' : '🛵 Vers le client';
   setEta(route
-    ? `🛵 Environ <b>${route.min} min</b> · ${route.km.toFixed(1).replace('.', ',')} km par la route`
-    : `À vol d'oiseau : <b>${fmtDist(distKm(me, job))}</b> <span class="tiny">(itinéraire routier indisponible, utilisez Plans ou Google Maps)</span>`);
+    ? `${what} : environ <b>${route.min} min</b> · ${kmFr(route.km)} km par la route`
+    : `${what} : <b>${fmtDist(distKm(me, tgt))}</b> à vol d'oiseau <span class="tiny">(itinéraire routier indisponible, utilisez Plans ou Google Maps)</span>`);
 }
 
 function initReqMap(requests) {
@@ -1084,9 +1212,7 @@ async function driverHome() {
     if (last.job && jobMap.job && jobMap.job.id === last.job.id) {  // le client a pu bouger
       jobMap.job.lat = last.job.lat; jobMap.job.lng = last.job.lng;
       if (jobMap.cm) jobMap.cm.setLatLng([last.job.lat, last.job.lng]);
-      const la = $('#lnk-apple'), lg = $('#lnk-google');
-      if (la) la.href = appleLink(last.job.lat, last.job.lng);
-      if (lg) lg.href = mapsLink(last.job.lat, last.job.lng);
+      updateNavLinks();
     }
     updateMaps();
   }
@@ -1108,10 +1234,15 @@ async function driverHome() {
         ${job.note ? `<dt>Précision</dt><dd>${esc(job.note)}</dd>` : ''}${job.distance_km != null ? `<dt>Distance</dt><dd>${fmtDist(job.distance_km)}</dd>` : ''}</dl>
         <div class="row"><a class="btn btn-sm grow" href="tel:+225${esc(job.client_phone)}">📞 Appeler</a>
           <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(job.client_phone, 'Bonjour, je suis votre chauffeur Sunrise Space, j\'arrive.')}">WhatsApp</a></div>
-        <div id="jobmap" class="map" aria-label="Carte : votre position et le client"></div>
+        ${hasDest(job) ? `<div class="seg" id="phaseseg" role="group" aria-label="Étape de la course"><button type="button" data-ph="pickup" aria-pressed="true">① Rejoindre le client</button><button type="button" data-ph="dest" aria-pressed="false">② Aller à la destination</button></div>` : ''}
+        <div id="jobmap" class="map" aria-label="Carte : votre position, le client et la destination"></div>
         <p id="jobeta" class="muted">Calcul de l'itinéraire…</p>
+        <p id="jobtrip" class="muted"></p>
+        <p id="navtarget" class="tiny muted"></p>
         <div class="row"><a id="lnk-apple" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">🧭 Plans (Apple)</a>
           <a id="lnk-google" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Google Maps</a></div>
+        ${!hasDest(job) && job.destination_text ? `<div class="row"><a class="btn btn-ghost btn-sm grow" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=${encodeURIComponent(job.destination_text + ', Côte d\'Ivoire')}&dirflg=d">🏁 Destination : Plans</a>
+          <a class="btn btn-ghost btn-sm grow" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.destination_text + ', Côte d\'Ivoire')}">🏁 Destination : Google</a></div>` : ''}
         <button class="btn btn-ok btn-block" data-act="complete" data-id="${job.id}">Course terminée</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${job.id}">Abandonner</button>
         <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">⚑ Signaler le client</button></div></section>`;
@@ -1121,7 +1252,7 @@ async function driverHome() {
       else if (!requests.length) html += empty('🌅', 'Aucune demande pour le moment', 'Restez disponible : les nouvelles demandes apparaissent ici automatiquement.');
       else html += '<p class="muted tiny">🔒 Le numéro du client s\'affiche après avoir accepté la course.</p><div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
           <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span>${r.vehicle_type && r.vehicle_type !== 'any' ? `<span class="chip">Demande : ${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).short)}</span>` : ''}</h3>
-          <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
+          <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.trip_km != null ? `<dt>Trajet</dt><dd>🏁 environ ${kmFr(r.trip_km)} km <span class="tiny muted">(à vol d'oiseau)</span></dd>` : ''}${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
           <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
           <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter la course</button></div></article>`).join('') + '</div>';
     }
@@ -1132,6 +1263,8 @@ async function driverHome() {
   }
 
   $('#dhome').addEventListener('click', async (e) => {
+    const ph = e.target.closest('#phaseseg [data-ph]');
+    if (ph) { setPhase(ph.dataset.ph); return; }
     const t = e.target.closest('#btn-toggle, [data-act]');
     if (!t) return;
     try {

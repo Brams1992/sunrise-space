@@ -247,3 +247,8 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .onlist li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .dotlive { width: 10px; height: 10px; border-radius: 50%; background: #2ecc71; flex: none; box-shadow: 0 0 0 3px rgba(46,204,113,.25); }
 .logoutbtn + .who { margin-left: 0; }
+
+.sugs { display: grid; gap: 4px; margin-top: -4px; }
+.sugs[hidden] { display: none; }
+.sug { text-align: left; border: 1px solid var(--line, #eadfc8); background: #fff; border-radius: 10px; padding: 10px 12px; font: inherit; font-size: .92rem; color: var(--night); cursor: pointer; }
+.sug:active { background: #fff3e0; }
