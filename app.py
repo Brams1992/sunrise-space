@@ -1014,7 +1014,7 @@ def _deliver(subs, payload):
     threading.Thread(target=work, daemon=True).start()
 
 
-def notify_users(db, user_ids, title, body_text, tag=None):
+def notify_users(db, user_ids, title, body_text, tag=None, urgent=False):
     """Prévient ces utilisateurs sur tous leurs appareils abonnés."""
     ids = list({int(i) for i in user_ids})
     if not ids:
@@ -1023,7 +1023,7 @@ def notify_users(db, user_ids, title, body_text, tag=None):
     subs = [dict(r) for r in db.execute(
         f"SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN ({marks})", ids).fetchall()]
     if subs:
-        _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/"}).encode())
+        _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/", "urgent": bool(urgent)}).encode())
     return len(subs)
 
 
@@ -1081,8 +1081,33 @@ def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup):
     near = [(km, uid) for km, uid in near if km <= NEARBY_RADIUS_KM][:30]
     for km, uid in near:
         where = f" · {pickup}" if pickup else ""
-        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}", tag=f"req-{rid}")
+        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}", tag=f"req-{rid}", urgent=True)
+    if near and PUSH_REMINDER_DELAYS:
+        threading.Thread(target=_remind_drivers, args=(rid, [u for _, u in near]), daemon=True).start()
     return len(near)
+
+
+PUSH_REMINDER_DELAYS = (12, 12, 12)   # tant que la demande est ouverte : on re-sonne 3 fois, toutes les 12 s
+
+
+def _remind_drivers(rid, driver_ids):
+    """Une notification ne sonne qu'un instant : on la renouvelle tant que personne n'a pris la demande."""
+    for delay in PUSH_REMINDER_DELAYS:
+        time.sleep(delay)
+        db = DB()
+        try:
+            r = db.execute("SELECT status FROM ride_requests WHERE id=?", (rid,)).fetchone()
+            if not r or r["status"] != "open":
+                return
+            marks = ",".join("?" * len(driver_ids))
+            still = [x["user_id"] for x in db.execute(
+                f"SELECT user_id FROM drivers WHERE availability='available' AND user_id IN ({marks})", driver_ids).fetchall()]
+            notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}", urgent=True)
+        except Exception:
+            app.logger.exception("rappel push")
+            return
+        finally:
+            db.close()
 
 
 _nudges = {}

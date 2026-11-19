@@ -236,6 +236,47 @@ document.addEventListener('click', async (e) => {
 });
 
 
+/* ---------- Sirène des demandes (application ouverte) ---------- */
+const alarm = { ctx: null, timer: null };
+function alarmEnabled() { try { return localStorage.getItem('ss_alarm') !== '0'; } catch { return true; } }
+function unlockAudio() {   // iPhone : le son n'est permis qu'après un premier toucher
+  try {
+    if (!alarm.ctx) { const C = window.AudioContext || window.webkitAudioContext; if (C) alarm.ctx = new C(); }
+    if (alarm.ctx && alarm.ctx.state === 'suspended') alarm.ctx.resume();
+  } catch { /* rien */ }
+}
+['touchstart', 'pointerdown', 'click'].forEach((ev) => document.addEventListener(ev, unlockAudio, { passive: true }));
+
+function stopAlarm() {
+  clearInterval(alarm.timer); alarm.timer = null;
+  try { if (navigator.vibrate) navigator.vibrate(0); } catch { /* rien */ }
+  const b = $('#alarmbar'); if (b) b.remove();
+}
+
+function startAlarm(force) {
+  if ((!force && !alarmEnabled()) || alarm.timer) return;
+  unlockAudio();
+  const end = Date.now() + 10000;                       // 10 secondes, ou jusqu'au premier toucher
+  const beep = () => {
+    if (Date.now() >= end) return stopAlarm();
+    const ctx = alarm.ctx;
+    if (!ctx || ctx.state !== 'running') return;
+    const t = ctx.currentTime;
+    [880, 1320].forEach((f, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain(), at = t + i * 0.25;
+      o.type = 'square'; o.frequency.value = f;
+      g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.7, at + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, at + 0.23);
+      o.connect(g); g.connect(ctx.destination); o.start(at); o.stop(at + 0.25);
+    });
+  };
+  const bar = document.createElement('div');
+  bar.id = 'alarmbar'; bar.className = 'alarmbar'; bar.textContent = '🙋 Nouvelle demande ! Touchez pour couper le son';
+  document.body.appendChild(bar);
+  beep(); alarm.timer = setInterval(beep, 600);
+  try { if (navigator.vibrate) navigator.vibrate(Array.from({ length: 9 }, () => [800, 300]).flat()); } catch { /* rien */ }
+  document.addEventListener('pointerdown', stopAlarm, { once: true });
+}
+
 /* ---------- Notes ---------- */
 function starsText(avg, count) { return avg == null ? 'Pas encore de note' : `⭐ ${String(avg).replace('.', ',')} (${count} avis)`; }
 function ratingHTML(r) {
@@ -599,6 +640,7 @@ function accountView() {
       </dl>
       ${installButtonHTML()}
       ${pushAccountHTML()}
+      ${state.user && state.user.role === 'driver' ? `<div class="row"><button class="btn btn-ghost grow" id="btn-alarm">${alarmEnabled() ? '🔊 Sirène des demandes : activée' : '🔇 Sirène des demandes : coupée'}</button><button class="btn btn-ghost btn-sm" id="btn-alarm-test">Tester</button></div>` : ''}
       <button class="btn btn-ghost btn-block" id="btn-pw">🔒 Changer mon mot de passe</button>
       <button class="btn btn-dark btn-block" id="btn-logout">Se déconnecter</button>
     </section>
@@ -607,6 +649,11 @@ function accountView() {
     </section>`;
   $('#btn-pw').onclick = openChangePassword;
   $('#btn-logout').onclick = logout;
+  const ba = $('#btn-alarm');
+  if (ba) {
+    ba.onclick = () => { try { localStorage.setItem('ss_alarm', alarmEnabled() ? '0' : '1'); } catch { /* rien */ } accountView(); };
+    $('#btn-alarm-test').onclick = () => { unlockAudio(); startAlarm(true); };
+  }
   const bp = $('#btn-push');
   if (bp) bp.onclick = async () => { const ok = await enablePush(); toast(ok ? 'Notifications activées ✅' : 'Notifications non activées', ok ? undefined : 'bad'); updatePushBar(); accountView(); };
 }
@@ -1114,12 +1161,16 @@ function updateMaps() {
 
 async function driverHome() {
   $('#main').innerHTML = '<div id="dhome" class="stack"><div class="empty"><p>Chargement…</p></div></div>';
-  let sig = null, last = null;
+  let sig = null, last = null, seen = null;
 
   async function load(force) {
     try { last = await api('/api/driver/dashboard'); } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); return; }
     state.driver = last.driver;
     const a = last.driver.availability;
+    const ids = last.requests.map((r) => r.id);
+    if (seen && a === 'available' && !last.job && ids.some((id) => !seen.has(id))) startAlarm();   // nouvelle demande : sirène
+    if (a !== 'available' || !ids.length) stopAlarm();
+    seen = new Set(ids);
     if ((a === 'available' || a === 'busy') && !state.locTimer) startLocSharing();
     if (a === 'unavailable' && state.locTimer) stopLocSharing();
     const s = JSON.stringify([a, last.driver.approval, last.job && last.job.id, last.requests.map((r) => r.id)]);
@@ -1210,6 +1261,7 @@ async function driverHome() {
 
   await load(true);
   every(6000, () => load(false));
+  state.onPush = () => load(false);   // une notification vient d'arriver : on actualise tout de suite
 }
 
 /* ======================= ADMIN ======================= */
@@ -1653,7 +1705,10 @@ async function adminInbox() {
 }
 
 async function boot() {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push' && state.onPush) state.onPush(); });
+  }
   try { state.meta = await api('/api/meta'); }
   catch { state.meta = { communes: [], report_reasons: {}, default_center: { lat: 5.36, lng: -4.0083 } }; }
   if (state.token) {

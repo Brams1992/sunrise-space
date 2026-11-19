@@ -238,3 +238,6 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .center { text-align: center; }
 .netbar { position: fixed; left: 0; right: 0; top: 0; z-index: 60; padding: 8px 12px; text-align: center; font-weight: 800; font-size: .9rem; background: #c0392b; color: #fff; }
 .netbar[hidden] { display: none; }
+
+.alarmbar { position: fixed; left: 12px; right: 12px; top: 12px; z-index: 80; padding: 16px; border-radius: 14px; text-align: center; font-weight: 800; font-size: 1.05rem; color: #fff; background: #d9480f; box-shadow: 0 6px 24px rgba(0,0,0,.35); animation: alarmblink .6s steps(2) infinite; }
+@keyframes alarmblink { 50% { background: #ff7a1a; } }

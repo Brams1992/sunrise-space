@@ -1,6 +1,6 @@
 // Service worker Sunrise Space : l'application s'ouvre même avec un réseau faible.
 // Les appels /api ne sont JAMAIS mis en cache (positions et statuts doivent être frais).
-const CACHE = "sunrise-space-v10";
+const CACHE = "sunrise-space-v11";
 const SHELL = ["/", "/style.css", "/app.js", "/manifest.webmanifest", "/icon.svg",
                "/icon-192.png", "/icon-512.png"];
 
@@ -38,10 +38,17 @@ self.addEventListener("fetch", (e) => {
 self.addEventListener("push", (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch (_) { /* message vide */ }
-  e.waitUntil(self.registration.showNotification(d.title || "Sunrise Space", {
-    body: d.body || "", tag: d.tag || "sunrise", renotify: true,
-    icon: "/icon-192.png", badge: "/icon-192.png", data: { url: d.url || "/" },
-  }));
+  // Demande de course : vibration longue (environ 10 s, Android) et notification qui reste affichée jusqu'au toucher.
+  const urgent = !!d.urgent;
+  const longBuzz = []; for (let i = 0; i < 9; i++) longBuzz.push(800, 300);
+  e.waitUntil(Promise.all([
+    self.registration.showNotification(d.title || "Sunrise Space", {
+      body: d.body || "", tag: d.tag || "sunrise", renotify: true, requireInteraction: urgent,
+      vibrate: urgent ? longBuzz : [200], icon: "/icon-192.png", badge: "/icon-192.png", data: { url: d.url || "/" },
+    }),
+    // application ouverte : on la prévient pour qu'elle actualise et fasse sonner sa sirène
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => list.forEach((c) => c.postMessage({ type: "push", urgent }))),
+  ]));
 });
 
 self.addEventListener("notificationclick", (e) => {
