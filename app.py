@@ -188,6 +188,26 @@ CREATE TABLE IF NOT EXISTS messages(
   created_at TEXT NOT NULL,
   read_at TEXT
 );
+CREATE TABLE IF NOT EXISTS calls(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
+  caller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  callee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'ringing',
+  created_at TEXT NOT NULL,
+  answered_at TEXT,
+  ended_at TEXT
+);
+CREATE TABLE IF NOT EXISTS call_signals(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  call_id INTEGER NOT NULL REFERENCES calls(id) ON DELETE CASCADE,
+  sender_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id, status);
+CREATE INDEX IF NOT EXISTS idx_signals_call ON call_signals(call_id, id);
 CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id, id);
 CREATE INDEX IF NOT EXISTS idx_drivers_search ON drivers(approval, availability);
 CREATE INDEX IF NOT EXISTS idx_req_status ON ride_requests(status, created_at);
@@ -907,8 +927,7 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
     if dlat is not None:
         out["distance_km"] = round(haversine_km(dlat, dlng, r["lat"], r["lng"]), 2)
     if reveal:
-        out["client_phone"] = r["client_phone"]
-        out["client_id"] = r["client_id"]
+        out["client_id"] = r["client_id"]   # sert au signalement ; le numéro, lui, n'est JAMAIS transmis (appel Sunrise)
     return out
 
 
@@ -1186,13 +1205,13 @@ def serialize_request_for_client(db, r):
     }
     if r["driver_id"] and r["status"] in ("accepted", "completed"):
         d = db.execute(
-            """SELECT u.id, u.name, u.phone, d.whatsapp, d.plate, d.vehicle_type, d.moto_model, d.lat, d.lng, d.location_at
+            """SELECT u.id, u.name, d.plate, d.vehicle_type, d.moto_model, d.lat, d.lng, d.location_at
                FROM users u JOIN drivers d ON d.user_id=u.id WHERE u.id=?""",
             (r["driver_id"],),
         ).fetchone()
         if d:
             out["driver"] = {
-                "id": d["id"], "name": d["name"], "phone": d["phone"], "whatsapp": d["whatsapp"],
+                "id": d["id"], "name": d["name"],
                 "plate": d["plate"], "vehicle_type": d["vehicle_type"], "moto_model": d["moto_model"],
                 "lat": d["lat"] if r["status"] == "accepted" else None,
                 "lng": d["lng"] if r["status"] == "accepted" else None,
@@ -1200,6 +1219,165 @@ def serialize_request_for_client(db, r):
                 "location_age_min": minutes_ago(d["location_at"]),
             }
     return out
+
+
+# --- Appels Sunrise dans l'application (voix par internet, WebRTC) --------------
+# Le serveur ne fait que passer les messages de mise en relation (signalisation) ; la voix va d'un téléphone à l'autre.
+# Personne ne voit jamais le numéro de l'autre : l'écran affiche seulement « Sunrise ».
+CALL_RING_SECONDS = 45
+CALL_MAX_SIGNALS = 300
+
+
+def ice_servers():
+    servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
+    raw = os.environ.get("CALL_ICE_SERVERS", "").strip()
+    if raw:
+        try:
+            extra = json.loads(raw)
+            if isinstance(extra, list):
+                return servers + [x for x in extra if isinstance(x, dict)]
+        except ValueError:
+            pass
+    turn = os.environ.get("TURN_URLS", "").strip()
+    if turn:
+        servers.append({"urls": [u.strip() for u in turn.split(",") if u.strip()],
+                        "username": os.environ.get("TURN_USERNAME", ""), "credential": os.environ.get("TURN_CREDENTIAL", "")})
+    return servers
+
+
+def expire_calls(db):
+    limit = ts(now() - timedelta(seconds=CALL_RING_SECONDS))
+    db.execute("UPDATE calls SET status='missed', ended_at=? WHERE status='ringing' AND created_at<?", (ts(), limit))
+    db.commit()
+
+
+def call_for(db, cid, user_id):
+    c = db.execute("SELECT * FROM calls WHERE id=?", (cid,)).fetchone()
+    if not c or user_id not in (c["caller_id"], c["callee_id"]):
+        return None
+    return c
+
+
+def valid_signal(text, limit=20000):
+    return isinstance(text, str) and 0 < len(text) <= limit
+
+
+@app.get("/api/calls/ice")
+@auth_required("client", "driver")
+def call_ice():
+    return jsonify({"iceServers": ice_servers()})
+
+
+@app.post("/api/calls")
+@auth_required("client", "driver")
+def call_start():
+    data = body()
+    try:
+        rid = int(data.get("request_id"))
+    except (TypeError, ValueError):
+        return err("Course invalide.")
+    if not valid_signal(data.get("offer")):
+        return err("Appel invalide.")
+    db = get_db()
+    r = db.execute("SELECT * FROM ride_requests WHERE id=? AND status='accepted'", (rid,)).fetchone()
+    me_id = g.user["id"]
+    if not r or me_id not in (r["client_id"], r["driver_id"]):
+        return err("L'appel n'est possible que pendant une course acceptée.", 403)
+    peer = r["driver_id"] if me_id == r["client_id"] else r["client_id"]
+    expire_calls(db)
+    db.execute("UPDATE calls SET status='ended', ended_at=? WHERE request_id=? AND status IN ('ringing','active')", (ts(), rid))
+    cid = db.insert("INSERT INTO calls(request_id,caller_id,callee_id,status,created_at) VALUES(?,?,?,?,?)",
+                    (rid, me_id, peer, "ringing", ts()))
+    db.execute("INSERT INTO call_signals(call_id,sender_id,kind,payload,created_at) VALUES(?,?,?,?,?)",
+               (cid, me_id, "offer", data["offer"], ts()))
+    db.commit()
+    notify_users(db, [peer], "📞 Appel Sunrise", "Appel entrant. Ouvrez Sunrise Space pour répondre.", tag="call", urgent=True)
+    return jsonify({"id": cid})
+
+
+@app.get("/api/calls/incoming")
+@auth_required("client", "driver")
+def call_incoming():
+    db = get_db()
+    expire_calls(db)
+    c = db.execute("SELECT * FROM calls WHERE callee_id=? AND status='ringing' ORDER BY id DESC LIMIT 1", (g.user["id"],)).fetchone()
+    if not c:
+        return jsonify({"call": None})
+    sig = db.execute("SELECT payload FROM call_signals WHERE call_id=? AND kind='offer' ORDER BY id LIMIT 1", (c["id"],)).fetchone()
+    return jsonify({"call": {"id": c["id"], "offer": sig["payload"] if sig else None}})
+
+
+@app.get("/api/calls/<int:cid>")
+@auth_required("client", "driver")
+def call_poll(cid):
+    db = get_db()
+    expire_calls(db)
+    c = call_for(db, cid, g.user["id"])
+    if not c:
+        return err("Appel introuvable.", 404)
+    try:
+        after = int(request.args.get("after", 0))
+    except ValueError:
+        after = 0
+    rows = db.execute(
+        "SELECT id, kind, payload FROM call_signals WHERE call_id=? AND id>? AND sender_id!=? ORDER BY id LIMIT 100",
+        (cid, after, g.user["id"])).fetchall()
+    return jsonify({"status": c["status"], "signals": [{"id": x["id"], "kind": x["kind"], "payload": x["payload"]} for x in rows]})
+
+
+@app.post("/api/calls/<int:cid>/accept")
+@auth_required("client", "driver")
+def call_accept(cid):
+    db = get_db()
+    expire_calls(db)
+    c = call_for(db, cid, g.user["id"])
+    answer = body().get("answer")
+    if not c or c["callee_id"] != g.user["id"]:
+        return err("Appel introuvable.", 404)
+    if c["status"] != "ringing":
+        return err("Cet appel est terminé.", 409)
+    if not valid_signal(answer):
+        return err("Réponse invalide.")
+    db.execute("UPDATE calls SET status='active', answered_at=? WHERE id=?", (ts(), cid))
+    db.execute("INSERT INTO call_signals(call_id,sender_id,kind,payload,created_at) VALUES(?,?,?,?,?)",
+               (cid, g.user["id"], "answer", answer, ts()))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/calls/<int:cid>/signal")
+@auth_required("client", "driver")
+def call_signal(cid):
+    db = get_db()
+    c = call_for(db, cid, g.user["id"])
+    data = body()
+    if not c:
+        return err("Appel introuvable.", 404)
+    if c["status"] not in ("ringing", "active"):
+        return jsonify({"ok": False})
+    if data.get("kind") != "ice" or not valid_signal(data.get("payload"), 4000):
+        return err("Signal invalide.")
+    n = db.execute("SELECT COUNT(*) AS n FROM call_signals WHERE call_id=?", (cid,)).fetchone()["n"]
+    if n >= CALL_MAX_SIGNALS:
+        return err("Trop de signaux.", 429)
+    db.execute("INSERT INTO call_signals(call_id,sender_id,kind,payload,created_at) VALUES(?,?,?,?,?)",
+               (cid, g.user["id"], "ice", data["payload"], ts()))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/calls/<int:cid>/end")
+@auth_required("client", "driver")
+def call_end(cid):
+    db = get_db()
+    c = call_for(db, cid, g.user["id"])
+    if not c:
+        return err("Appel introuvable.", 404)
+    if c["status"] in ("ringing", "active"):
+        status = "declined" if (c["status"] == "ringing" and c["callee_id"] == g.user["id"]) else "ended"
+        db.execute("UPDATE calls SET status=?, ended_at=? WHERE id=?", (status, ts(), cid))
+        db.commit()
+    return jsonify({"ok": True})
 
 
 @app.post("/api/requests")
@@ -1914,7 +2092,7 @@ def validate_backup(db, data):
 
 def restore_all(db, data):
     """Remplace TOUT le contenu par celui de la sauvegarde, dans une seule transaction (l'appelant valide ou annule)."""
-    for table in ["tokens", "push_subscriptions", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
+    for table in ["call_signals", "calls", "tokens", "push_subscriptions", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
         db.execute(f"DELETE FROM {table}")
     for table, _order in BACKUP_TABLES:
         groups = {}

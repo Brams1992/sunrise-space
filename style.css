@@ -252,3 +252,18 @@ input:focus, select:focus, textarea:focus, button:focus-visible, a:focus-visible
 .sugs[hidden] { display: none; }
 .sug { text-align: left; border: 1px solid var(--line, #eadfc8); background: #fff; border-radius: 10px; padding: 10px 12px; font: inherit; font-size: .92rem; color: var(--night); cursor: pointer; }
 .sug:active { background: #fff3e0; }
+
+/* Appels Sunrise */
+.callui { position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, #1b1233 0%, #3a1c4a 55%, #c2571a 100%); color: #fff; text-align: center; padding: 24px; }
+.callbox { width: 100%; max-width: 340px; }
+.callicon { border-radius: 22px; box-shadow: 0 8px 30px rgba(0,0,0,.35); margin-bottom: 14px; }
+.callbox h1 { margin: 6px 0 4px; font-size: 2rem; letter-spacing: .5px; color: #fff; }
+.callstat { font-size: 1.15rem; margin: 0 0 4px; }
+.callsub { opacity: .75; margin: 0 0 36px; }
+.callbtns { display: flex; justify-content: center; gap: 36px; flex-wrap: wrap; }
+.callbtn { display: flex; flex-direction: column; align-items: center; gap: 8px; border: 0; background: none; color: #fff; font: inherit; font-size: .85rem; cursor: pointer; }
+.callbtn span { display: flex; align-items: center; justify-content: center; width: 68px; height: 68px; border-radius: 50%; font-size: 1.6rem; background: rgba(255,255,255,.18); }
+.callbtn.yes span { background: #1fa855; }
+.callbtn.end span { background: #d93a3a; }
+.callbtn.on span { background: #fff; color: #222; }
+.callui audio { display: none; }

@@ -284,6 +284,215 @@ function ratingHTML(r) {
   return `<div class="stack center"><b>Comment s'est passée la course ?</b><div class="stars">${[1, 2, 3, 4, 5].map((n) => `<button type="button" class="star" data-stars="${n}" data-rid="${r.id}" aria-label="${n} étoile${n > 1 ? 's' : ''}">⭐</button>`).join('')}</div></div>`;
 }
 
+/* ---------- Appels Sunrise : voix par internet, numéros jamais affichés ---------- */
+const callState = { id: null, pc: null, stream: null, poll: null, after: 0, ringTimer: null, tick: null, since: 0, muted: false, queue: [], outIce: [], busy: false, ended: false };
+const callSupported = () => !!(window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+function callUI(status, buttons, sub) {
+  let ui = $('#callui');
+  if (!ui) { ui = document.createElement('div'); ui.id = 'callui'; ui.className = 'callui'; document.body.appendChild(ui); }
+  ui.innerHTML = `<div class="callbox"><img src="/icon-192.png" alt="" width="84" height="84" class="callicon">
+    <h1>Sunrise</h1><p class="callstat" id="callstat">${esc(status)}</p><p class="tiny callsub">${esc(sub || 'Appel gratuit par internet')}</p>
+    <div class="callbtns">${buttons}</div></div><audio id="callaudio" autoplay playsinline></audio>`;
+  const a = $('#callaudio'); if (a && callState.stream0) a.srcObject = callState.stream0;
+}
+const callBtn = (id, cls, icon, label) => `<button class="callbtn ${cls}" id="${id}"><span>${icon}</span>${esc(label)}</button>`;
+
+function ringTone(on) {
+  clearInterval(callState.ringTimer); callState.ringTimer = null;
+  try { if (navigator.vibrate) navigator.vibrate(0); } catch { /* rien */ }
+  if (!on) return;
+  unlockAudio();
+  const play = () => {
+    const ctx = alarm.ctx;
+    if (ctx && ctx.state === 'running') {
+      const t = ctx.currentTime;
+      [[523, 0], [659, 0.18], [784, 0.36]].forEach(([f, d]) => {
+        const o = ctx.createOscillator(), g = ctx.createGain(), at = t + d;
+        o.type = 'sine'; o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.5, at + 0.03); g.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+        o.connect(g); g.connect(ctx.destination); o.start(at); o.stop(at + 0.32);
+      });
+    }
+    try { if (navigator.vibrate) navigator.vibrate([500, 250, 500]); } catch { /* rien */ }
+  };
+  play(); callState.ringTimer = setInterval(play, 2200);
+}
+
+function callCleanup(message) {
+  ringTone(false);
+  clearInterval(callState.poll); clearInterval(callState.tick);
+  callState.poll = callState.tick = null;
+  if (callState.pc) { try { callState.pc.close(); } catch { /* rien */ } }
+  if (callState.stream) callState.stream.getTracks().forEach((t) => t.stop());
+  Object.assign(callState, { id: null, pc: null, stream: null, stream0: null, after: 0, queue: [], outIce: [], muted: false, busy: false, since: 0 });
+  const ui = $('#callui'); if (ui) ui.remove();
+  if (message) toast(message);
+}
+
+async function callPrepare() {
+  if (!callSupported()) throw new Error("L'appel n'est pas disponible sur cet appareil. Mettez à jour votre navigateur.");
+  callState.ended = false;
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch { throw new Error('Autorisez le micro pour passer un appel (Réglages du téléphone > Sunrise Space / Safari > Micro).'); }
+  let servers = [{ urls: 'stun:stun.l.google.com:19302' }];
+  try { servers = (await api('/api/calls/ice')).iceServers || servers; } catch { /* STUN par défaut */ }
+  const pc = new RTCPeerConnection({ iceServers: servers });
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  callState.stream = stream; callState.pc = pc;
+  pc.ontrack = (e) => { callState.stream0 = e.streams[0]; const a = $('#callaudio'); if (a) { a.srcObject = e.streams[0]; a.play().catch(() => {}); } };
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    const payload = JSON.stringify(e.candidate.toJSON ? e.candidate.toJSON() : e.candidate);
+    if (callState.id) api(`/api/calls/${callState.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
+    else callState.outIce.push(payload);
+  };
+  pc.onconnectionstatechange = () => {
+    if (callState.pc !== pc) return;
+    if (pc.connectionState === 'connected') callConnected();
+    if (pc.connectionState === 'failed') hangUp('Connexion impossible. Vérifiez votre réseau et réessayez.');
+  };
+  return pc;
+}
+
+function callConnected() {
+  if (callState.since) return;
+  ringTone(false);
+  callState.since = Date.now();
+  callUI('En communication · 00:00', callBtn('call-mute', 'mute', '🎙️', 'Couper le micro') + callBtn('call-end', 'end', '📞', 'Raccrocher'));
+  bindCallButtons();
+  callState.tick = setInterval(() => {
+    const sec = Math.floor((Date.now() - callState.since) / 1000);
+    const el = $('#callstat'); if (el) el.textContent = `En communication · ${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+  }, 1000);
+}
+
+function bindCallButtons() {
+  const end = $('#call-end'); if (end) end.onclick = () => hangUp();
+  const mute = $('#call-mute');
+  if (mute) mute.onclick = () => {
+    callState.muted = !callState.muted;
+    if (callState.stream) callState.stream.getAudioTracks().forEach((t) => { t.enabled = !callState.muted; });
+    mute.innerHTML = `<span>${callState.muted ? '🔇' : '🎙️'}</span>${callState.muted ? 'Micro coupé' : 'Couper le micro'}`;
+  };
+}
+
+async function hangUp(message) {
+  const id = callState.id;
+  callState.ended = true;
+  callCleanup(message);
+  if (id) { try { await api(`/api/calls/${id}/end`, { method: 'POST' }); } catch { /* rien */ } }
+}
+
+async function applySignals(list) {
+  const pc = callState.pc;
+  for (const sg of list) {
+    callState.after = Math.max(callState.after, sg.id);
+    try {
+      if (sg.kind === 'answer') {
+        await pc.setRemoteDescription(JSON.parse(sg.payload));
+        for (const c of callState.queue.splice(0)) await pc.addIceCandidate(c).catch(() => {});
+      } else if (sg.kind === 'ice') {
+        const c = JSON.parse(sg.payload);
+        if (pc.remoteDescription) await pc.addIceCandidate(c).catch(() => {}); else callState.queue.push(c);
+      }
+    } catch { /* signal ignoré */ }
+  }
+}
+
+function pollCall(caller) {
+  clearInterval(callState.poll);
+  const id = callState.id;
+  callState.poll = setInterval(async () => {
+    if (callState.id !== id || callState.busy) return;
+    callState.busy = true;
+    try {
+      const r = await api(`/api/calls/${id}?after=${callState.after}`);
+      if (callState.id !== id) return;
+      await applySignals(r.signals.filter((x) => x.kind !== 'offer'));
+      if (r.status === 'active' && !callState.since && callState.pc && callState.pc.connectionState === 'connected') callConnected();
+      if (r.status !== 'ringing' && r.status !== 'active') {
+        callState.ended = true;
+        callCleanup({ declined: 'Appel refusé', missed: caller ? 'Pas de réponse' : 'Appel manqué', ended: 'Appel terminé' }[r.status] || 'Appel terminé');
+      }
+    } catch (e) { if (e.status === 404) callCleanup(); } finally { callState.busy = false; }
+  }, 1500);
+}
+
+async function startCall(requestId) {
+  if (callState.id || callState.pc) return;
+  try {
+    callUI('Appel en cours…', callBtn('call-end', 'end', '📞', 'Annuler'), 'Connexion…');
+    bindCallButtons();
+    const pc = await callPrepare();
+    const offer = await pc.createOffer({ offerToReceiveAudio: true });
+    await pc.setLocalDescription(offer);
+    const r = await api('/api/calls', { method: 'POST', body: { request_id: requestId, offer: JSON.stringify(pc.localDescription) } });
+    if (callState.ended || callState.pc !== pc) { api(`/api/calls/${r.id}/end`, { method: 'POST' }).catch(() => {}); return; }
+    callState.id = r.id;
+    for (const payload of callState.outIce.splice(0)) api(`/api/calls/${r.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
+    callUI('Sonnerie…', callBtn('call-end', 'end', '📞', 'Raccrocher'), 'En attente de réponse');
+    bindCallButtons();
+    pollCall(true);
+  } catch (e) { callCleanup(); toast(e.message, 'bad'); }
+}
+
+async function answerCall(call) {
+  try {
+    ringTone(false);
+    callUI('Connexion…', callBtn('call-end', 'end', '📞', 'Raccrocher'));
+    bindCallButtons();
+    const pc = await callPrepare();
+    callState.id = call.id;
+    await pc.setRemoteDescription(JSON.parse(call.offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await api(`/api/calls/${call.id}/accept`, { method: 'POST', body: { answer: JSON.stringify(pc.localDescription) } });
+    for (const payload of callState.outIce.splice(0)) api(`/api/calls/${call.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
+    callUI('Connexion…', callBtn('call-end', 'end', '📞', 'Raccrocher'));
+    bindCallButtons();
+    callState.after = 0;
+    pollCall(false);
+  } catch (e) {
+    const id = call.id; callCleanup(); toast(e.status === 409 ? 'Cet appel est terminé.' : e.message, 'bad');
+    api(`/api/calls/${id}/end`, { method: 'POST' }).catch(() => {});
+  }
+}
+
+function showIncoming(call) {
+  callState.id = call.id; callState.incoming = true;
+  callUI('Appel entrant', callBtn('call-no', 'end', '✖', 'Refuser') + callBtn('call-yes', 'yes', '📞', 'Répondre'), 'Sunrise Space');
+  ringTone(true);
+  $('#call-yes').onclick = () => { callState.id = null; answerCall(call); };
+  $('#call-no').onclick = async () => { const id = call.id; callCleanup(); try { await api(`/api/calls/${id}/end`, { method: 'POST' }); } catch { /* rien */ } };
+  // l'appelant a raccroché ou n'a pas eu de réponse : l'écran disparaît
+  clearInterval(callState.poll);
+  callState.poll = setInterval(async () => {
+    if (callState.id !== call.id || callState.pc) return;
+    try { const r = await api(`/api/calls/${call.id}?after=999999999`); if (r.status !== 'ringing') callCleanup('Appel manqué'); } catch { /* rien */ }
+  }, 2000);
+}
+
+async function checkIncomingCall() {
+  if (!state.user || !['client', 'driver'].includes(state.user.role) || callState.id || callState.pc || document.hidden) return;
+  try {
+    const { call } = await api('/api/calls/incoming');
+    if (call && call.offer && !callState.id && !callState.pc) showIncoming(call);
+  } catch { /* rien */ }
+}
+
+function startCallWatcher() {
+  clearInterval(state.callTimer);
+  state.callTimer = setInterval(checkIncomingCall, 3000);
+  checkIncomingCall();
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIncomingCall(); });
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-call]');
+  if (b) { unlockAudio(); startCall(Number(b.dataset.call)); }
+});
+
 /* ---------- Réseau faible ---------- */
 function netBar(show) {
   let b = $('#netbar');
@@ -415,6 +624,7 @@ function renderShell(role, tabs) {
   if (role === 'validator') return;   // pas de messagerie ni de notifications pour un validateur
   syncPush();
   refreshUnread();
+  if (role === 'client' || role === 'driver') startCallWatcher();
   state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
 }
 
@@ -623,7 +833,8 @@ function renderForcedChange() {
 }
 
 async function logout() {
-  clearInterval(state.unreadTimer);
+  clearInterval(state.unreadTimer); clearInterval(state.callTimer);
+  if (callState.id || callState.pc) await hangUp();
   await forgetPush();   // cet appareil ne doit plus recevoir les notifications de ce compte
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* on se déconnecte quand même */ }
   localStorage.removeItem('ss_token');
@@ -788,6 +999,13 @@ async function clientRequest() {
     }
   }
 
+  function driverBlock(d, rid) {
+    return `<div class="card flat">
+      <div class="row"><div class="avatar" aria-hidden="true">🏍️</div><div class="grow"><h3>${esc(d.name)}</h3><p class="muted">${esc(d.moto_model || veh(d.vehicle_type).label)} · ${esc(d.plate)}</p>${d.rating_avg != null ? `<p class="tiny muted">${starsText(d.rating_avg, d.rating_count)}</p>` : ''}</div></div>
+      <div class="row" style="margin-top:10px"><button class="btn btn-sm btn-block" data-call="${rid}">📞 Appeler le chauffeur (Sunrise)</button></div>
+      <p class="tiny muted">🔒 Les numéros de téléphone restent privés : l'appel passe par Sunrise.</p></div>`;
+  }
+
   function paint(r) {
     const box = $('#reqbox');
     const key = r ? `${r.id}:${r.status}` : 'none';
@@ -816,7 +1034,7 @@ async function clientRequest() {
     } else if (r.status === 'accepted' && r.driver) {
       box.innerHTML = `<section class="card stack job"><h2>✅ Un chauffeur arrive !</h2>
         <div id="cmap" class="map" aria-label="Carte : votre position et le chauffeur"></div>
-        <p id="ceta" class="muted">Recherche du chauffeur sur la carte…</p>${driverBlock(r.driver)}${where}
+        <p id="ceta" class="muted">Recherche du chauffeur sur la carte…</p>${driverBlock(r.driver, r.id)}${where}
         <button class="btn btn-ok btn-block" id="btn-done">J'ai terminé ma course</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" id="btn-cancel">Annuler</button>
         <button class="btn btn-ghost btn-sm grow" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">⚑ Signaler</button></div></section>`;
@@ -1232,8 +1450,8 @@ async function driverHome() {
       html += `<section class="card job stack"><h2>🛵 Course en cours</h2>
         <dl class="kv"><dt>Client</dt><dd>${esc(job.client_name)}</dd><dt>Départ</dt><dd>${esc(job.pickup_text || 'Position GPS du client (voir la carte)')}</dd><dt>Destination</dt><dd>${esc(job.destination_text || '—')}</dd>
         ${job.note ? `<dt>Précision</dt><dd>${esc(job.note)}</dd>` : ''}${job.distance_km != null ? `<dt>Distance</dt><dd>${fmtDist(job.distance_km)}</dd>` : ''}</dl>
-        <div class="row"><a class="btn btn-sm grow" href="tel:+225${esc(job.client_phone)}">📞 Appeler</a>
-          <a class="btn btn-sm btn-wa grow" target="_blank" rel="noopener" href="${waLink(job.client_phone, 'Bonjour, je suis votre chauffeur Sunrise Space, j\'arrive.')}">WhatsApp</a></div>
+        <button class="btn btn-sm btn-block" data-call="${job.id}">📞 Appeler le client (Sunrise)</button>
+        <p class="tiny muted">🔒 Le numéro du client reste privé : l'appel passe par Sunrise.</p>
         ${hasDest(job) ? `<div class="seg" id="phaseseg" role="group" aria-label="Étape de la course"><button type="button" data-ph="pickup" aria-pressed="true">① Rejoindre le client</button><button type="button" data-ph="dest" aria-pressed="false">② Aller à la destination</button></div>` : ''}
         <div id="jobmap" class="map" aria-label="Carte : votre position, le client et la destination"></div>
         <p id="jobeta" class="muted">Calcul de l'itinéraire…</p>
@@ -1250,7 +1468,7 @@ async function driverHome() {
       html += '<div class="section-head"><h2>Demandes près de vous</h2></div>';
       if (d.availability !== 'available') html += empty('😴', 'Vous êtes indisponible', 'Passez « Disponible » pour recevoir les demandes des clients proches.');
       else if (!requests.length) html += empty('🌅', 'Aucune demande pour le moment', 'Restez disponible : les nouvelles demandes apparaissent ici automatiquement.');
-      else html += '<p class="muted tiny">🔒 Le numéro du client s\'affiche après avoir accepté la course.</p><div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
+      else html += '<p class="muted tiny">🔒 Le numéro du client n\'est jamais affiché : après acceptation, vous l\'appelez via Sunrise.</p><div id="reqmap" class="map" aria-label="Carte des demandes"></div><div class="list">' + requests.map((r) => `<article class="card item">
           <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span>${r.vehicle_type && r.vehicle_type !== 'any' ? `<span class="chip">Demande : ${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).short)}</span>` : ''}</h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.trip_km != null ? `<dt>Trajet</dt><dd>🏁 environ ${kmFr(r.trip_km)} km <span class="tiny muted">(à vol d'oiseau)</span></dd>` : ''}${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
           <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
@@ -1848,7 +2066,7 @@ async function adminInbox() {
 async function boot() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
-    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push' && state.onPush) state.onPush(); });
+    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push') { if (state.onPush) state.onPush(); checkIncomingCall(); } });
   }
   try { state.meta = await api('/api/meta'); }
   catch { state.meta = { communes: [], report_reasons: {}, default_center: { lat: 5.36, lng: -4.0083 } }; }
