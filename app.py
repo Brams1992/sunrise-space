@@ -190,7 +190,7 @@ CREATE TABLE IF NOT EXISTS messages(
 );
 CREATE TABLE IF NOT EXISTS calls(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  request_id INTEGER NOT NULL REFERENCES ride_requests(id) ON DELETE CASCADE,
+  request_id INTEGER REFERENCES ride_requests(id) ON DELETE CASCADE,
   caller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   callee_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   status TEXT NOT NULL DEFAULT 'ringing',
@@ -338,6 +338,15 @@ def init_db(create_admin=True):
         ensure_column(db, "ride_requests", "rating_comment", "TEXT")
         ensure_column(db, "ride_requests", "dest_lat", "REAL")
         ensure_column(db, "ride_requests", "dest_lng", "REAL")
+        if get_setting(db, "calls_v2") != "1":
+            # les appels sont éphémères : on recrée leurs tables pour que request_id soit facultatif (appels de l'admin)
+            db.execute("DROP TABLE IF EXISTS call_signals")
+            db.execute("DROP TABLE IF EXISTS calls")
+            for statement in schema_sql():
+                if "calls" in statement or "call_signals" in statement:
+                    db.execute(statement)
+            set_setting(db, "calls_v2", "1")
+            db.commit()
         if create_admin:
             ensure_admin(db)
     finally:
@@ -1282,22 +1291,50 @@ def valid_signal(text, limit=20000):
 
 
 @app.get("/api/calls/ice")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_ice():
     return jsonify({"iceServers": ice_servers()})
 
 
+def admin_call_start(db, data):
+    """L'administrateur appelle un client ou un chauffeur actuellement connecté ; il voit « Sunrise » de l'autre côté."""
+    if g.user["staff_scope"] == "validator":
+        return err("Accès refusé.", 403)
+    try:
+        uid = int(data.get("user_id"))
+    except (TypeError, ValueError):
+        return err("Utilisateur invalide.")
+    u = db.execute("SELECT id, role, last_seen_at FROM users WHERE id=? AND role IN ('client','driver') AND is_blocked=0", (uid,)).fetchone()
+    if not u:
+        return err("Utilisateur introuvable.", 404)
+    if not u["last_seen_at"] or minutes_ago(u["last_seen_at"]) > ONLINE_WINDOW_MIN:
+        return err("Cette personne n'est pas connectée en ce moment.", 409)
+    expire_calls(db)
+    if db.execute("SELECT 1 FROM calls WHERE status IN ('ringing','active') AND (callee_id=? OR caller_id=?)", (uid, uid)).fetchone():
+        return err("Cette personne est déjà en communication.", 409)
+    db.execute("UPDATE calls SET status='ended', ended_at=? WHERE caller_id=? AND status IN ('ringing','active')", (ts(), g.user["id"]))
+    cid = db.insert("INSERT INTO calls(request_id,caller_id,callee_id,status,created_at) VALUES(?,?,?,?,?)",
+                    (None, g.user["id"], uid, "ringing", ts()))
+    db.execute("INSERT INTO call_signals(call_id,sender_id,kind,payload,created_at) VALUES(?,?,?,?,?)",
+               (cid, g.user["id"], "offer", data["offer"], ts()))
+    db.commit()
+    notify_users(db, [uid], "📞 Appel Sunrise", "Appel entrant. Ouvrez Sunrise Space pour répondre.", tag="call", urgent=True)
+    return jsonify({"id": cid})
+
+
 @app.post("/api/calls")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_start():
     data = body()
+    if not valid_signal(data.get("offer")):
+        return err("Appel invalide.")
+    db = get_db()
+    if g.user["role"] == "admin":
+        return admin_call_start(db, data)
     try:
         rid = int(data.get("request_id"))
     except (TypeError, ValueError):
         return err("Course invalide.")
-    if not valid_signal(data.get("offer")):
-        return err("Appel invalide.")
-    db = get_db()
     r = db.execute("SELECT * FROM ride_requests WHERE id=? AND status='accepted'", (rid,)).fetchone()
     me_id = g.user["id"]
     if not r or me_id not in (r["client_id"], r["driver_id"]):
@@ -1315,7 +1352,7 @@ def call_start():
 
 
 @app.get("/api/calls/incoming")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_incoming():
     db = get_db()
     expire_calls(db)
@@ -1327,7 +1364,7 @@ def call_incoming():
 
 
 @app.get("/api/calls/<int:cid>")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_poll(cid):
     db = get_db()
     expire_calls(db)
@@ -1345,7 +1382,7 @@ def call_poll(cid):
 
 
 @app.post("/api/calls/<int:cid>/accept")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_accept(cid):
     db = get_db()
     expire_calls(db)
@@ -1365,7 +1402,7 @@ def call_accept(cid):
 
 
 @app.post("/api/calls/<int:cid>/signal")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_signal(cid):
     db = get_db()
     c = call_for(db, cid, g.user["id"])
@@ -1386,7 +1423,7 @@ def call_signal(cid):
 
 
 @app.post("/api/calls/<int:cid>/end")
-@auth_required("client", "driver")
+@auth_required("client", "driver", "admin")
 def call_end(cid):
     db = get_db()
     c = call_for(db, cid, g.user["id"])

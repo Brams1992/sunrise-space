@@ -437,19 +437,19 @@ function pollCall(caller) {
   }, 1500);
 }
 
-async function startCall(requestId) {
+async function startCall(target, who) {
   if (callState.id || callState.pc) return;
   try {
-    callUI('Appel en cours…', callBtn('call-end', 'end', '📞', 'Annuler'), 'Connexion…');
+    callUI('Appel en cours…', callBtn('call-end', 'end', '📞', 'Annuler'), who ? `Connexion avec ${who}…` : 'Connexion…');
     bindCallButtons();
     const pc = await callPrepare();
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
     await pc.setLocalDescription(offer);
-    const r = await api('/api/calls', { method: 'POST', body: { request_id: requestId, offer: JSON.stringify(pc.localDescription) } });
+    const r = await api('/api/calls', { method: 'POST', body: { ...target, offer: JSON.stringify(pc.localDescription) } });
     if (callState.ended || callState.pc !== pc) { api(`/api/calls/${r.id}/end`, { method: 'POST' }).catch(() => {}); return; }
     callState.id = r.id;
     for (const payload of callState.outIce.splice(0)) api(`/api/calls/${r.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
-    callUI('Sonnerie…', callBtn('call-end', 'end', '📞', 'Raccrocher'), 'En attente de réponse');
+    callUI('Sonnerie…', callBtn('call-end', 'end', '📞', 'Raccrocher'), who ? `En attente de ${who}` : 'En attente de réponse');
     bindCallButtons();
     pollCall(true);
   } catch (e) { callCleanup(); toast(e.message, 'bad'); }
@@ -507,7 +507,9 @@ function startCallWatcher() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) checkIncomingCall(); });
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-call]');
-  if (b) { unlockAudio(); startCall(Number(b.dataset.call)); }
+  if (b) { unlockAudio(); startCall({ request_id: Number(b.dataset.call) }); return; }
+  const u = e.target.closest('[data-callu]');
+  if (u) { unlockAudio(); startCall({ user_id: Number(u.dataset.callu) }, u.dataset.name); }
 });
 
 /* ---------- Réseau faible ---------- */
@@ -1704,7 +1706,7 @@ async function adminStats() {
   async function loadOnline() {
     try {
       const o = await api('/api/admin/online');
-      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span></li>`;
+      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span> <button class="btn btn-sm" data-callu="${u.id}" data-name="${esc(u.name)}" aria-label="Appeler ${esc(u.name)} dans l'application">📞 Appeler</button></li>`;
       const dst = { available: ' · 🟢 disponible', busy: ' · 🔴 en course', unavailable: ' · ⚪ indisponible' };
       $('#online').innerHTML = `<section class="card stack"><h3>🟢 En ligne maintenant</h3>
         <p class="muted tiny">Application ouverte à l'écran dans les 3 dernières minutes.</p>
