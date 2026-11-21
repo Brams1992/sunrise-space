@@ -386,3 +386,22 @@ input::placeholder, textarea::placeholder { color: #8A94A6; }
 @media (prefers-reduced-motion: reduce) { .auth-scene .sun, .auth-scene .dawn { transition: none; } }
 .trust li { background: rgba(7, 18, 42, .62); -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px); }
 .auth-foot a { text-shadow: 0 1px 6px rgba(7, 18, 42, .8); font-weight: 600; }
+
+/* ---------- Écran d'ouverture : le soleil se lève ---------- */
+#splash { position: fixed; inset: 0; z-index: 10000; background: linear-gradient(180deg, #060F24 0%, #0F2A56 55%, #2B2F63 100%); overflow: hidden; display: grid; place-items: center; animation: spOut .6s ease 2.6s forwards; }
+#splash .sp-dawn { position: absolute; inset: 0; opacity: 0; background: linear-gradient(180deg, #14396F 0%, #6A5BA0 40%, #F0813A 76%, #FFC766 100%); animation: spDawn 2s ease-out .15s forwards; }
+#splash .sp-sun { position: absolute; left: 50%; top: 66%; width: min(62vw, 280px); aspect-ratio: 1; border-radius: 50%; transform: translate(-50%, 0); background: radial-gradient(circle at 50% 45%, #FFF3B8 0%, #FFC83D 38%, #FF8A1F 72%, #FF6A00 100%); box-shadow: 0 0 80px 30px rgba(255, 170, 60, .5), 0 0 240px 100px rgba(255, 122, 26, .3); animation: spRise 2.1s cubic-bezier(.2, .75, .25, 1) .1s both; }
+#splash .sp-land { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 24vh; min-height: 120px; z-index: 2; }
+#splash .sp-text { position: relative; z-index: 3; text-align: center; color: #fff; margin-top: -46vh; padding: 0 20px; animation: spText 1s ease 1.1s both; }
+#splash .sp-name { font-size: clamp(2.1rem, 9vw, 3rem); font-weight: 800; letter-spacing: -.02em; text-shadow: 0 2px 18px rgba(7, 18, 42, .55); }
+#splash .sp-tag { margin-top: 6px; font-size: 1rem; font-weight: 500; opacity: .92; text-shadow: 0 1px 10px rgba(7, 18, 42, .6); }
+@keyframes spRise { from { top: 108%; } to { top: 36%; } }
+@keyframes spDawn { to { opacity: 1; } }
+@keyframes spText { from { opacity: 0; transform: translateY(14px); letter-spacing: .08em; } to { opacity: 1; transform: none; } }
+@keyframes spOut { to { opacity: 0; visibility: hidden; } }
+@media (prefers-reduced-motion: reduce) {
+  #splash { animation: spOut .3s ease 1.2s forwards; }
+  #splash .sp-sun { animation: none; top: 36%; }
+  #splash .sp-dawn { animation: none; opacity: 1; }
+  #splash .sp-text { animation: none; }
+}

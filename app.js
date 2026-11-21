@@ -716,7 +716,7 @@ function renderAuth() {
   $('#app').innerHTML = `
     <div class="auth-scene" id="scene" style="--rise:.12">
       <div class="sky" aria-hidden="true"><div class="dawn"></div><div class="sun"></div>
-        <svg class="land" viewBox="0 0 400 140" preserveAspectRatio="none"><path d="M0 70 C60 40 120 60 190 48 C260 36 330 62 400 44 L400 140 L0 140Z" fill="#0F2547"/><path d="M0 100 L0 80 h22 v-18 h16 v18 h14 v-30 h18 v30 h20 v-12 h14 v12 h26 v-22 h16 v22 h18 v-34 h16 v34 h22 v-16 h14 v16 h24 v-26 h16 v26 h18 v-12 h22 v12 h24 L400 140 L0 140Z" fill="#081630"/></svg>
+        <svg class="land" viewBox="0 0 400 140" preserveAspectRatio="none"><path d="M0 70 C60 40 120 60 190 48 C260 36 330 62 400 44 L400 140 L0 140Z" fill="#0F2547"/><path d="M0 100 L0 80 h22 v-18 h16 v18 h14 v-30 h18 v30 h20 v-12 h14 v12 h26 v-22 h16 v22 h18 v-34 h16 v34 h22 v-16 h14 v16 h24 v-26 h16 v26 h18 v-12 h22 v12 h24 H400 V140 H0Z" fill="#081630"/></svg>
       </div>
       <div class="auth-wrap">
         <header class="auth-head">
@@ -2128,7 +2128,10 @@ async function adminInbox() {
   draw();
 }
 
+function endSplash() { const sp = document.getElementById('splash'); if (sp) sp.remove(); }
 async function boot() {
+  const sp = document.getElementById('splash');
+  if (sp) { sp.addEventListener('pointerdown', endSplash, { once: true }); setTimeout(endSplash, 3200); }
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
     navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push') { if (state.onPush) state.onPush(); checkIncomingCall(); if (e.data.urgent && state.user && state.user.role === 'admin') startAlarm(false, state.user.scope === 'validator' ? '🔔 Chauffeur à valider !' : '🔔 Nouveau chauffeur ou message !'); } });
