@@ -270,7 +270,7 @@ function stopAlarm() {
   const b = $('#alarmbar'); if (b) b.remove();
 }
 
-function startAlarm(force) {
+function startAlarm(force, label) {
   if ((!force && !alarmEnabled()) || alarm.timer) return;
   unlockAudio();
   const end = Date.now() + 10000;                       // 10 secondes, ou jusqu'au premier toucher
@@ -287,7 +287,7 @@ function startAlarm(force) {
     });
   };
   const bar = document.createElement('div');
-  bar.id = 'alarmbar'; bar.className = 'alarmbar'; bar.textContent = '🙋 Nouvelle demande ! Touchez pour couper le son';
+  bar.id = 'alarmbar'; bar.className = 'alarmbar'; bar.textContent = (label || '🙋 Nouvelle demande !') + ' Touchez pour couper le son';
   document.body.appendChild(bar);
   beep(); alarm.timer = setInterval(beep, 600);
   try { if (navigator.vibrate) navigator.vibrate(Array.from({ length: 9 }, () => [800, 300]).flat()); } catch { /* rien */ }
@@ -532,7 +532,7 @@ function urlB64ToBytes(b64) {
 
 /* Abonne cet appareil (ou le re-lie au compte connecté). La permission doit déjà être accordée. */
 async function syncPush() {
-  if (!PUSH_OK || !state.user || state.user.role === 'admin' || Notification.permission !== 'granted') return false;
+  if (!PUSH_OK || !state.user || Notification.permission !== 'granted') return false;
   try {
     const reg = await navigator.serviceWorker.ready;
     let sub = await reg.pushManager.getSubscription();
@@ -562,6 +562,7 @@ async function forgetPush() {
 }
 
 function pushWhy() {
+  if (state.user && state.user.role === 'admin') return 'Soyez prévenu (avec sonnerie) à chaque chauffeur à valider et à chaque message reçu.';
   return state.user && state.user.role === 'driver'
     ? 'Recevez les demandes de course près de vous, même application fermée.'
     : 'Soyez prévenu dès qu\'un chauffeur accepte votre demande, même application fermée.';
@@ -572,7 +573,7 @@ function updatePushBar() {
   if (!bar) return;
   const role = state.user && state.user.role;
   bar.hidden = true;
-  if (role !== 'client' && role !== 'driver') return;
+  if (role !== 'client' && role !== 'driver' && role !== 'admin') return;
   if (PUSH_OK) {
     if (Notification.permission !== 'default') return;
     bar.innerHTML = `<div><strong>🔔 Notifications</strong><br>${pushWhy()}</div><button class="btn btn-sm" id="push-on">Activer</button>`;
@@ -2084,7 +2085,7 @@ async function adminInbox() {
 async function boot() {
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
-    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push') { if (state.onPush) state.onPush(); checkIncomingCall(); } });
+    navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push') { if (state.onPush) state.onPush(); checkIncomingCall(); if (e.data.urgent && state.user && state.user.role === 'admin') startAlarm(false, state.user.scope === 'validator' ? '🔔 Chauffeur à valider !' : '🔔 Nouveau chauffeur ou message !'); } });
   }
   try { state.meta = await api('/api/meta'); }
   catch { state.meta = { communes: [], report_reasons: {}, default_center: { lat: 5.36, lng: -4.0083 } }; }

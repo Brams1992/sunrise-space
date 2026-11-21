@@ -471,7 +471,7 @@ def issue_token(db, user_id):
 
 
 # Un « validateur » est un compte admin à accès réduit (staff_scope='validator') : il ne peut appeler QUE ces pages.
-VALIDATOR_ENDPOINTS = {"admin_drivers", "admin_driver_approval", "admin_users", "me", "logout", "change_password"}
+VALIDATOR_ENDPOINTS = {"admin_drivers", "admin_driver_approval", "admin_users", "me", "logout", "change_password", "push_key", "push_subscribe", "push_unsubscribe"}
 
 
 def auth_required(*roles):
@@ -704,6 +704,8 @@ def register():
             (uid, driver["plate"], driver["vehicle_type"], driver["moto_model"], driver["permis"], driver["commune"], driver["whatsapp"]),
         )
     db.commit()
+    if role == "driver":
+        notify_staff(db, "🏍️ Chauffeur à valider", f"{name} ({commune_label(driver)}) vient de s'inscrire.", "staff-driver")
     try:
         send_welcome(db, uid, role, name)
     except Exception:
@@ -1093,6 +1095,23 @@ def notify_users(db, user_ids, title, body_text, tag=None, urgent=False):
     if subs:
         _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/", "urgent": bool(urgent)}).encode())
     return len(subs)
+
+
+def commune_label(driver):
+    return f"{driver.get('commune', '')} · {driver.get('vehicle_type', '')}".strip(" ·")
+
+
+def staff_ids(db, validators=True):
+    """Comptes administrateurs actifs (avec ou sans les validateurs) à prévenir par notification."""
+    rows = db.execute("SELECT id, staff_scope FROM users WHERE role='admin' AND is_blocked=0").fetchall()
+    return [r["id"] for r in rows if validators or r["staff_scope"] != "validator"]
+
+
+def notify_staff(db, title, text, tag, validators=True):
+    try:
+        notify_users(db, staff_ids(db, validators), title, text, tag=tag, urgent=True)
+    except Exception:
+        app.logger.exception("notification administrateurs")
 
 
 @app.get("/api/push/key")
@@ -2237,6 +2256,8 @@ def inbox_send():
     db.execute("INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)",
                (g.user["id"], "user", text, ts()))
     db.commit()
+    who = "client" if g.user["role"] == "client" else "chauffeur"
+    notify_staff(db, f"✉️ Message de {g.user['name']}", f"({who}) {text[:120]}", f"staff-msg-{g.user['id']}", validators=False)
     return jsonify({"ok": True}), 201
 
 
