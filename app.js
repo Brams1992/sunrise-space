@@ -199,6 +199,23 @@ function bindPosControls() {
 }
 
 /* ---------- Carte (Leaflet, optionnelle) ---------- */
+// Fond de carte : le client voit par défaut l'image satellite (avec noms de lieux et routes) pour mieux reconnaître les lieux ; bouton pour revenir au plan.
+function addBase(map) {
+  const plan = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
+  if (!state.user || state.user.role !== 'client') { plan.addTo(map); return; }
+  const esri = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
+  const sat = L.layerGroup([
+    L.tileLayer(esri + 'World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Imagerie © Esri' }),
+    L.tileLayer(esri + 'Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
+    L.tileLayer(esri + 'Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
+  ]);
+  let saved = 'sat';
+  try { saved = localStorage.getItem('ss_basemap') || 'sat'; } catch (_) { /* stockage indisponible */ }
+  (saved === 'plan' ? plan : sat).addTo(map);
+  L.control.layers({ '🛰️ Satellite': sat, '🗺️ Plan': plan }, null, { position: 'topright', collapsed: false }).addTo(map);
+  map.on('baselayerchange', (e) => { try { localStorage.setItem('ss_basemap', e.layer === plan ? 'plan' : 'sat'); } catch (_) { /* ignoré */ } });
+}
+
 function setupMap(elId) {
   const el = $('#' + elId);
   if (!window.L) {
@@ -207,7 +224,7 @@ function setupMap(elId) {
   }
   const c = state.pos || { ...state.meta.default_center };
   const map = L.map(elId, { zoomControl: true }).setView([c.lat, c.lng], state.pos ? 14 : 11);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  addBase(map);
   state.layers = L.layerGroup().addTo(map);
   state.map = map;
   if (state.pos) drawMe(state.pos);
@@ -694,6 +711,7 @@ function renderAuth() {
           <label>Numéro de téléphone<input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="07 07 07 07 07" maxlength="18" required></label>
           <label>Mot de passe<input name="password" type="password" autocomplete="current-password" minlength="6" placeholder="Au moins 6 caractères" required></label>
           <button type="button" class="link" id="forgot">Mot de passe oublié ?</button>
+          <a class="link" href="/bienvenue.html" style="text-align:center;display:block">🔒 Qui sommes-nous ? Pourquoi nous faire confiance</a>
           <div id="driver-box" class="stack" hidden>
             <label>Votre véhicule<select name="vehicle_type">${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}">${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
             <label>Plaque d'immatriculation<input name="plate" maxlength="20" placeholder="Ex. 1234 AB 01"></label>
@@ -950,7 +968,7 @@ async function clientRequest() {
       <div id="pickmap" class="map" style="height:52vh"></div>
       <div class="row"><button class="btn btn-ghost grow" id="pk-cancel">Annuler</button><button class="btn grow" id="pk-ok" disabled>Confirmer ce lieu</button></div>`);
     const map = L.map('pickmap').setView([start.lat, start.lng], destPick ? 16 : 14);
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+    addBase(map);
     setTimeout(() => map.invalidateSize(), 200);
     let mk = null, pick = destPick;
     const put = (ll) => { pick = { lat: ll.lat, lng: ll.lng }; if (mk) mk.setLatLng(ll); else mk = L.marker(ll, { icon: pinIcon('🏁') }).addTo(map); $('#pk-ok', m.el).disabled = false; };
@@ -1205,7 +1223,7 @@ function setEta(html) { const el = $('#jobeta'); if (el) el.innerHTML = html; }
 
 function newMap(elId) {
   const map = L.map(elId, { zoomControl: true });
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
+  addBase(map);
   state.map = map;
   state.layers = L.layerGroup().addTo(map);
   setTimeout(() => map.invalidateSize(), 150);

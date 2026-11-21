@@ -588,7 +588,7 @@ def security_headers(resp):
         "default-src 'self'; "
         "script-src 'self' https://unpkg.com; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
-        "img-src 'self' data: blob: https://unpkg.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org; "
+        "img-src 'self' data: blob: https://unpkg.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com; "
         "connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
@@ -601,7 +601,7 @@ def security_headers(resp):
 
 # --- Pages / méta -------------------------------------------------------------
 PUBLIC_FILES = {
-    "index.html", "app.js", "style.css", "sw.js", "manifest.webmanifest",
+    "index.html", "bienvenue.html", "bienvenue.js", "app.js", "style.css", "sw.js", "manifest.webmanifest",
     "icon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
 }
 
