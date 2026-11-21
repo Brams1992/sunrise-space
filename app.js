@@ -704,17 +704,27 @@ function openTab(role, tab) {
 }
 
 /* ---------- Authentification ---------- */
+const AUTH_ICONS = {
+  phone: svgI('<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>'),
+  lock: svgI('<rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>'),
+  eye: svgI('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
+};
+
 function renderAuth() {
   let mode = 'login', role = 'client';
   const communes = (state.meta.communes || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   $('#app').innerHTML = `
-    <div class="shell">
-      <section class="hero">
-        <img src="/icon-192.png" alt="Logo Sunrise Space">
-        <h1>Sunrise Space</h1>
-        <p>Trouvez une moto, un taxi ou un tricycle près de vous, en un instant.</p>
-      </section>
-      <section class="card auth-card">
+    <div class="auth-scene" id="scene" style="--rise:.12">
+      <div class="sky" aria-hidden="true"><div class="dawn"></div><div class="sun"></div>
+        <svg class="land" viewBox="0 0 400 140" preserveAspectRatio="none"><path d="M0 70 C60 40 120 60 190 48 C260 36 330 62 400 44 L400 140 L0 140Z" fill="#0F2547"/><path d="M0 100 L0 80 h22 v-18 h16 v18 h14 v-30 h18 v30 h20 v-12 h14 v12 h26 v-22 h16 v22 h18 v-34 h16 v34 h22 v-16 h14 v16 h24 v-26 h16 v26 h18 v-12 h22 v12 h24 L400 140 L0 140Z" fill="#081630"/></svg>
+      </div>
+      <div class="auth-wrap">
+        <header class="auth-head">
+          <img src="/icon-192.png" alt="Logo Sunrise Space" width="64" height="64">
+          <h1>Sunrise Space</h1>
+          <p id="auth-sub">Bon retour. Connectez-vous pour demander ou recevoir une course.</p>
+        </header>
+        <section class="glass">
         <div class="seg" role="group" aria-label="Mode">
           <button type="button" data-mode="login" aria-pressed="true">Connexion</button>
           <button type="button" data-mode="register" aria-pressed="false">Créer un compte</button>
@@ -727,10 +737,9 @@ function renderAuth() {
             </div>
           </div>
           <label id="f-name" hidden>Nom complet<input name="name" autocomplete="name" maxlength="60" placeholder="Ex. Awa Koné"></label>
-          <label>Numéro de téléphone<input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="07 07 07 07 07" maxlength="18" required></label>
-          <label>Mot de passe<input name="password" type="password" autocomplete="current-password" minlength="6" placeholder="Au moins 6 caractères" required></label>
+          <label>Numéro de téléphone<span class="fld"><i class="fi">${AUTH_ICONS.phone}</i><input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="07 07 07 07 07" maxlength="18" required></span></label>
+          <label>Mot de passe<span class="fld"><i class="fi">${AUTH_ICONS.lock}</i><input name="password" type="password" autocomplete="current-password" minlength="6" placeholder="Au moins 6 caractères" required><button type="button" class="eye" id="eye" aria-label="Afficher le mot de passe" aria-pressed="false">${AUTH_ICONS.eye}</button></span></label>
           <button type="button" class="link" id="forgot">Mot de passe oublié ?</button>
-          <a class="link" href="/bienvenue.html" style="text-align:center;display:block">🔒 Qui sommes-nous ? Pourquoi nous faire confiance</a>
           <div id="driver-box" class="stack" hidden>
             <label>Votre véhicule<select name="vehicle_type">${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}">${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
             <label>Plaque d'immatriculation<input name="plate" maxlength="20" placeholder="Ex. 1234 AB 01"></label>
@@ -743,13 +752,17 @@ function renderAuth() {
           <p class="banner bad" id="auth-error" role="alert" hidden></p>
           <button class="btn btn-block" id="auth-submit" type="submit">Se connecter</button>
         </form>
-      </section>
-      <section class="feat">
-        <div><span class="ic">${FEAT_ICONS.pin}</span><p><b>Un chauffeur près de vous</b><br><span class="muted">Moto, taxi ou tricycle : envoyez votre demande, le premier chauffeur disponible l'accepte.</span></p></div>
-        <div><span class="ic">${FEAT_ICONS.call}</span><p><b>Appel gratuit, numéro protégé</b><br><span class="muted">Vous appelez le chauffeur depuis l'application : personne ne voit le numéro de l'autre.</span></p></div>
-        <div><span class="ic">${FEAT_ICONS.shield}</span><p><b>Chauffeurs vérifiés</b><br><span class="muted">Chaque profil est contrôlé, et vous pouvez signaler un abus.</span></p></div>
-        ${installButtonHTML()}
-      </section>
+        </section>
+        <ul class="trust" aria-label="Nos engagements">
+          <li>${FEAT_ICONS.shield}<span>Chauffeurs vérifiés</span></li>
+          <li>${FEAT_ICONS.call}<span>Appel gratuit</span></li>
+          <li>${FEAT_ICONS.pin}<span>Numéros protégés</span></li>
+        </ul>
+        <div class="auth-foot">
+          <a href="/bienvenue.html">Qui sommes-nous ? Pourquoi nous faire confiance</a>
+          ${installButtonHTML()}
+        </div>
+      </div>
     </div>`;
 
   const form = $('#authform'), err = $('#auth-error');
@@ -761,6 +774,7 @@ function renderAuth() {
     $('#f-name').hidden = !reg;
     $('#driver-box').hidden = !(reg && role === 'driver');
     $('#auth-submit').textContent = reg ? 'Créer mon compte' : 'Se connecter';
+    $('#auth-sub').textContent = reg ? 'Créez votre compte en une minute.' : 'Bon retour. Connectez-vous pour demander ou recevoir une course.';
     $('#forgot').hidden = reg;
     form.password.autocomplete = reg ? 'new-password' : 'current-password';
     err.hidden = true;
@@ -768,6 +782,20 @@ function renderAuth() {
   $$('[data-mode]').forEach((b) => (b.onclick = () => { mode = b.dataset.mode; sync(); }));
   $$('[data-role]').forEach((b) => (b.onclick = () => { role = b.dataset.role; sync(); }));
   $('#forgot').onclick = () => openForgot(form.phone.value);
+  // Le soleil se lève au fur et à mesure que le formulaire se remplit.
+  const scene = $('#scene');
+  const rise = () => {
+    const p = Math.min(form.phone.value.replace(/\D/g, '').length, 10) / 10;
+    const w = Math.min(form.password.value.length, 6) / 6;
+    scene.style.setProperty('--rise', (0.12 + 0.88 * (p * 0.55 + w * 0.45)).toFixed(3));
+  };
+  form.addEventListener('input', rise);
+  $('#eye').onclick = () => {
+    const show = form.password.type === 'password';
+    form.password.type = show ? 'text' : 'password';
+    $('#eye').setAttribute('aria-pressed', String(show));
+    $('#eye').setAttribute('aria-label', show ? 'Masquer le mot de passe' : 'Afficher le mot de passe');
+  };
 
   form.onsubmit = async (ev) => {
     ev.preventDefault();
