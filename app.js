@@ -603,6 +603,24 @@ function pushAccountHTML() {
   return `<button class="btn btn-ghost btn-block" id="btn-push">🔔 Activer les notifications</button>`;
 }
 
+/* Icônes de navigation (traits fins, même famille) */
+const svgI = (d) => `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const NAV_ICONS = {
+  request: svgI('<path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/>'),
+  home: svgI('<path d="M3 11l18-8-8 18-2-8-8-2z"/>'),
+  inbox: svgI('<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M4 7l8 6 8-6"/>'),
+  account: svgI('<circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c0-3.8 3.4-6 7.5-6s7.5 2.2 7.5 6"/>'),
+  stats: svgI('<path d="M5 20V11M12 20V4M19 20v-6"/>'),
+  drivers: svgI('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.4"/><path d="M3.3 10.6l6.4 1.2M20.7 10.6l-6.4 1.2M12 14.4V21"/>'),
+  users: svgI('<circle cx="9" cy="8" r="3.4"/><path d="M2.8 20c0-3.4 2.8-5.4 6.2-5.4s6.2 2 6.2 5.4"/><circle cx="17" cy="9" r="2.6"/><path d="M17 14.6c2.6 0 4.2 1.6 4.2 4.4"/>'),
+  reports: svgI('<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>'),
+};
+const FEAT_ICONS = {
+  pin: svgI('<path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/>'),
+  call: svgI('<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/>'),
+  shield: svgI('<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/>'),
+};
+
 /* ---------- Rendu principal ---------- */
 function render() {
   clearTimers();
@@ -631,7 +649,7 @@ function renderShell(role, tabs) {
       <main id="main"></main>
     </div>
     <nav class="bottomnav" aria-label="Navigation"><div class="inner">
-      ${tabs.map(([id, ic, label]) => `<button data-tab="${id}"><span class="ic" aria-hidden="true">${ic}${id === 'inbox' ? '<i class="dot" id="inbox-dot" hidden></i>' : ''}</span>${esc(label)}</button>`).join('')}
+      ${tabs.map(([id, ic, label]) => `<button data-tab="${id}"><span class="ic" aria-hidden="true">${NAV_ICONS[id] || ic}${id === 'inbox' ? '<i class="dot" id="inbox-dot" hidden></i>' : ''}</span>${esc(label)}</button>`).join('')}
     </div></nav>`;
   $$('.bottomnav [data-tab]').forEach((b) => (b.onclick = () => openTab(role, b.dataset.tab)));
   const tl = $('#btn-top-logout');
@@ -727,9 +745,9 @@ function renderAuth() {
         </form>
       </section>
       <section class="feat">
-        <div><span class="ic">📍</span><p><b>Un chauffeur près de vous</b><br><span class="muted">Moto, taxi ou tricycle : envoyez votre demande, le premier chauffeur disponible l'accepte.</span></p></div>
-        <div><span class="ic">📞</span><p><b>Appel ou WhatsApp direct</b><br><span class="muted">Vous vous arrangez avec le chauffeur, paiement en espèces.</span></p></div>
-        <div><span class="ic">🛡️</span><p><b>Chauffeurs vérifiés</b><br><span class="muted">Chaque profil est contrôlé, et vous pouvez signaler un abus.</span></p></div>
+        <div><span class="ic">${FEAT_ICONS.pin}</span><p><b>Un chauffeur près de vous</b><br><span class="muted">Moto, taxi ou tricycle : envoyez votre demande, le premier chauffeur disponible l'accepte.</span></p></div>
+        <div><span class="ic">${FEAT_ICONS.call}</span><p><b>Appel gratuit, numéro protégé</b><br><span class="muted">Vous appelez le chauffeur depuis l'application : personne ne voit le numéro de l'autre.</span></p></div>
+        <div><span class="ic">${FEAT_ICONS.shield}</span><p><b>Chauffeurs vérifiés</b><br><span class="muted">Chaque profil est contrôlé, et vous pouvez signaler un abus.</span></p></div>
         ${installButtonHTML()}
       </section>
     </div>`;
