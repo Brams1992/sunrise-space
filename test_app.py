@@ -821,6 +821,10 @@ class TestSunrise(Base):
         import gzip as _gz
         self.assertIn(b"renderShell", _gz.decompress(r.data))
         self.assertIsNone(self.c.get("/app.js").headers.get("Content-Encoding"))
+        # mots de passe évidents refusés
+        for pw in ("123456", "0707070700", "111111", "Azerty"):
+            r = self.call("post", "/api/auth/register", json={"role": "client", "name": "Test Faible", "phone": "0707070700", "password": pw})
+            self.assertEqual(r.status_code, 400, pw)
         # champ piège anti-robot
         r = self.call("post", "/api/auth/register", json={"role": "client", "name": "Bot Spam", "phone": "0707070700", "password": "secret1", "website": "http://spam"})
         self.assertEqual(r.status_code, 400)

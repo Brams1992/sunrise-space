@@ -762,6 +762,8 @@ def register():
         return err("Numéro invalide. Entrez les 10 chiffres (ex. 07 07 07 07 07).")
     if len(password) < 6 or len(password) > 100:
         return err("Le mot de passe doit contenir au moins 6 caractères.")
+    if weak_password(password, phone):
+        return err(WEAK_MSG)
 
     driver = {}
     if role == "driver":
@@ -855,6 +857,20 @@ _forgot_hits = {}                                        # adresse IP -> instant
 FORGOT_MAX_PER_HOUR = 5
 
 
+COMMON_PASSWORDS = {"123456", "1234567", "12345678", "123456789", "000000", "111111", "123123", "654321", "azerty", "azerty123",
+                    "password", "motdepasse", "qwerty", "abc123", "sunrise", "sunrise123", "007007", "121212"}
+
+
+def weak_password(password, phone=""):
+    """Refuse les mots de passe évidents (numéro de téléphone, chiffre répété, suites et mots courants)."""
+    p = password.lower()
+    digits = re.sub(r"\D", "", phone or "")
+    return p in COMMON_PASSWORDS or len(set(p)) == 1 or (digits and (p == digits or p == digits[-6:] or p == digits[-8:]))
+
+
+WEAK_MSG = "Ce mot de passe est trop facile à deviner. Évitez votre numéro et les suites comme 123456."
+
+
 @app.post("/api/auth/change-password")
 @auth_required()
 def change_password():
@@ -869,6 +885,8 @@ def change_password():
         return err("Le mot de passe actuel est incorrect.", 403)
     if len(new) < 6 or len(new) > 100:
         return err("Le nouveau mot de passe doit contenir au moins 6 caractères.")
+    if weak_password(new, g.user["phone"]):
+        return err(WEAK_MSG)
     if new == current:
         return err("Choisissez un mot de passe différent de l'ancien.")
     _login_fails.pop(key, None)
