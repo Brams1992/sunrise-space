@@ -35,12 +35,16 @@ else:
     import sqlite3
 
 # --- Réglages -----------------------------------------------------------------
-PUSH_DRIVER_MAX_AGE_H = 12     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 12 h
-GHOST_AFTER_H = 2             # « Disponible » sans position depuis 2 h : repassé automatiquement en indisponible
+PUSH_DRIVER_MAX_AGE_H = 14     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 14 h
+GHOST_AFTER_H = 12            # « Disponible » sans position depuis 12 h : repassé automatiquement en indisponible
 MAX_TRIP_KM = 300               # destination à plus de 300 km du départ : refusée
 ONLINE_WINDOW_MIN = 3          # « en ligne » = application ouverte à l'écran dans les 3 dernières minutes
 NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
 NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
+CHAIN_RADIUS_KM = 3         # un chauffeur en course peut accepter une demande à moins de 3 km de la destination de son client
+CHAIN_MAX_QUEUE = 3         # nombre maximum de courses en attente derrière la course en cours
+FILE_MAX_BYTES = 12 * 1024 * 1024   # taille maximale d'un fichier envoyé par l'admin
+FILE_KEEP_DAYS = 7                  # un fichier non téléchargé est effacé du serveur après 7 jours
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
 REQUEST_TTL_MIN = 30         # une demande non prise expire après 30 min
 TOKEN_TTL_DAYS = 30
@@ -213,6 +217,11 @@ CREATE TABLE IF NOT EXISTS call_signals(
 CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls(callee_id, status);
 CREATE INDEX IF NOT EXISTS idx_signals_call ON call_signals(call_id, id);
 CREATE INDEX IF NOT EXISTS idx_msg_user ON messages(user_id, id);
+CREATE TABLE IF NOT EXISTS message_files(
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL, mime TEXT NOT NULL, name TEXT NOT NULL, size INTEGER NOT NULL,
+  data BLOB, state TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_drivers_search ON drivers(approval, availability);
 CREATE INDEX IF NOT EXISTS idx_req_status ON ride_requests(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_req_client ON ride_requests(client_id, status);
@@ -298,7 +307,7 @@ def close_db(_exc):
 def schema_sql():
     sql = SCHEMA
     if USE_PG:
-        sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace(" REAL", " DOUBLE PRECISION")
+        sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY").replace(" REAL", " DOUBLE PRECISION").replace(" BLOB", " BYTEA")
     return [part.strip() for part in sql.split(";") if part.strip()]
 
 
@@ -566,6 +575,9 @@ def sweep_ghost_drivers(db):
     if time.time() - _last_sweep[0] < 60:
         return
     _last_sweep[0] = time.time()
+    db.execute("UPDATE message_files SET data=NULL, state='expired' WHERE state='pending' AND created_at<?",
+               (ts(now() - timedelta(days=FILE_KEEP_DAYS)),))
+    db.commit()
     limit = ts(now() - timedelta(hours=GHOST_AFTER_H))
     rows = db.execute("SELECT user_id FROM drivers WHERE availability='available' AND (location_at IS NULL OR location_at<?)", (limit,)).fetchall()
     if not rows:
@@ -574,7 +586,7 @@ def sweep_ghost_drivers(db):
     for uid in ids:
         db.execute("UPDATE drivers SET availability='unavailable' WHERE user_id=? AND availability='available'", (uid,))
     db.commit()
-    notify_users(db, ids, "Vous êtes passé indisponible", "Sans position depuis 2 h. Rouvrez Sunrise Space et repassez « Disponible » pour recevoir des demandes.", tag="ghost")
+    notify_users(db, ids, "Vous êtes passé indisponible", "Sans position depuis 12 h. Rouvrez Sunrise Space et repassez « Disponible » pour recevoir des demandes.", tag="ghost")
 
 
 def driver_profile(db, user_id):
@@ -602,7 +614,7 @@ def security_headers(resp):
         "script-src 'self' https://unpkg.com; "
         "style-src 'self' 'unsafe-inline' https://unpkg.com; "
         "img-src 'self' data: blob: https://unpkg.com https://tile.openstreetmap.org https://*.tile.openstreetmap.org https://server.arcgisonline.com; "
-        "connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
+        "media-src 'self' blob:; connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
     if request.path.startswith("/api/"):
@@ -946,6 +958,57 @@ def serialize_request_for_driver(r, dlat, dlng, reveal):
     return out
 
 
+def driver_rides(db, uid):
+    """Courses acceptées par un chauffeur, dans l'ordre : la première est la course en cours, les autres attendent."""
+    return db.execute(
+        """SELECT r.*, u.name AS client_name, u.phone AS client_phone
+           FROM ride_requests r JOIN users u ON u.id=r.client_id
+           WHERE r.driver_id=? AND r.status='accepted' ORDER BY r.accepted_at ASC, r.id ASC""", (uid,)).fetchall()
+
+
+def chain_anchor(rides):
+    """La course en cours si le chauffeur peut encore recevoir des demandes sur son trajet (destination connue, file pas pleine)."""
+    if rides and rides[0]["dest_lat"] is not None and len(rides) - 1 < CHAIN_MAX_QUEUE:
+        return rides[0]
+    return None
+
+
+def chain_km(anchor, r):
+    return haversine_km(anchor["dest_lat"], anchor["dest_lng"], r["lat"], r["lng"])
+
+
+def free_driver_if_idle(db, uid):
+    if not db.execute("SELECT 1 FROM ride_requests WHERE driver_id=? AND status='accepted'", (uid,)).fetchone():
+        db.execute("UPDATE drivers SET availability='available' WHERE user_id=? AND availability='busy'", (uid,))
+
+
+@app.get("/api/driver/history")
+@auth_required("driver")
+def driver_history():
+    """Historique des courses du chauffeur (le numéro du client n'est jamais transmis)."""
+    db = get_db()
+    rows = db.execute(
+        """SELECT r.*, u.name AS client_name FROM ride_requests r JOIN users u ON u.id=r.client_id
+           WHERE r.driver_id=? ORDER BY r.id DESC LIMIT 200""", (g.user["id"],)).fetchall()
+    day, week = ts(now() - timedelta(days=1)), ts(now() - timedelta(days=7))
+    items, done = [], [r for r in rows if r["status"] == "completed"]
+    for r in rows:
+        items.append({
+            "id": r["id"], "status": r["status"], "client_name": r["client_name"],
+            "pickup_text": r["pickup_text"], "destination_text": r["destination_text"],
+            "vehicle_type": r["vehicle_type"], "rating": r["rating"],
+            "accepted_at": r["accepted_at"], "closed_at": r["closed_at"], "created_at": r["created_at"],
+            "trip_km": round(haversine_km(r["lat"], r["lng"], r["dest_lat"], r["dest_lng"]), 1) if r["dest_lat"] is not None else None,
+        })
+    stats = {
+        "completed": len(done),
+        "today": sum(1 for r in done if (r["closed_at"] or "") >= day),
+        "week": sum(1 for r in done if (r["closed_at"] or "") >= week),
+        "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
+    }
+    return jsonify({"rides": items, "stats": stats})
+
+
 @app.get("/api/driver/dashboard")
 @auth_required("driver")
 def driver_dashboard():
@@ -954,16 +1017,13 @@ def driver_dashboard():
     sweep_ghost_drivers(db)
     d = db.execute("SELECT * FROM drivers WHERE user_id=?", (g.user["id"],)).fetchone()
     profile = driver_profile(db, g.user["id"])
-    job, requests = None, []
-    row = db.execute(
-        """SELECT r.*, u.name AS client_name, u.phone AS client_phone
-           FROM ride_requests r JOIN users u ON u.id=r.client_id
-           WHERE r.driver_id=? AND r.status='accepted' ORDER BY r.id DESC LIMIT 1""",
-        (g.user["id"],),
-    ).fetchone()
-    if row:
-        job = serialize_request_for_driver(row, d["lat"], d["lng"], True)
-    elif d["approval"] == "approved" and d["lat"] is not None and d["availability"] == "available":
+    job, requests, queue = None, [], []
+    rides = driver_rides(db, g.user["id"])
+    anchor = chain_anchor(rides)
+    if rides:
+        job = serialize_request_for_driver(rides[0], d["lat"], d["lng"], True)
+        queue = [serialize_request_for_driver(r, d["lat"], d["lng"], True) for r in rides[1:]]
+    if (anchor or (not rides and d["approval"] == "approved" and d["lat"] is not None and d["availability"] == "available")) and d["lat"] is not None:
         rows = db.execute(
             """SELECT r.*, u.name AS client_name, u.phone AS client_phone
                FROM ride_requests r JOIN users u ON u.id=r.client_id
@@ -972,11 +1032,16 @@ def driver_dashboard():
         ).fetchall()
         for r in rows:
             item = serialize_request_for_driver(r, d["lat"], d["lng"], False)
-            if item["distance_km"] <= NEARBY_RADIUS_KM:
+            if anchor:   # en course : seulement les demandes proches de la destination du client actuel
+                item["chain_km"] = round(chain_km(anchor, r), 2)
+                if item["chain_km"] <= CHAIN_RADIUS_KM:
+                    requests.append(item)
+            elif item["distance_km"] <= NEARBY_RADIUS_KM:
                 requests.append(item)
-        requests.sort(key=lambda x: x["distance_km"])
+        requests.sort(key=lambda x: x.get("chain_km", x["distance_km"]))
         requests = requests[:30]
-    return jsonify({"driver": profile, "job": job, "requests": requests})
+    chain = {"radius_km": CHAIN_RADIUS_KM, "max_queue": CHAIN_MAX_QUEUE, "can": bool(anchor), "has_dest": bool(rides and rides[0]["dest_lat"] is not None)}
+    return jsonify({"driver": profile, "job": job, "queue": queue, "requests": requests, "chain": chain})
 
 
 
@@ -1173,16 +1238,31 @@ def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup, trip_km=None):
     """Nouvelle demande : on prévient les chauffeurs disponibles à moins de 15 km de leur dernière position connue."""
     fresh = ts(now() - timedelta(hours=PUSH_DRIVER_MAX_AGE_H))
     rows = db.execute(
-        """SELECT d.user_id, d.lat, d.lng FROM drivers d JOIN users u ON u.id=d.user_id
-           WHERE d.approval='approved' AND d.availability='available' AND u.is_blocked=0
+        """SELECT d.user_id, d.lat, d.lng, d.availability FROM drivers d JOIN users u ON u.id=d.user_id
+           WHERE d.approval='approved' AND d.availability IN ('available','busy') AND u.is_blocked=0
                  AND d.lat IS NOT NULL AND d.location_at>=?
                  AND (? = 'any' OR d.vehicle_type=?)""", (fresh, wanted, wanted)).fetchall()
-    near = sorted(((haversine_km(lat, lng, r["lat"], r["lng"]), r["user_id"]) for r in rows))
-    near = [(km, uid) for km, uid in near if km <= NEARBY_RADIUS_KM][:30]
-    for km, uid in near:
+    cand = []
+    for r in rows:
+        if r["availability"] == "available":
+            km = haversine_km(lat, lng, r["lat"], r["lng"])
+            if km <= NEARBY_RADIUS_KM:
+                cand.append((km, r["user_id"], False))
+        else:   # en course : prévenu seulement si la demande est près de la destination de son client actuel
+            anchor = chain_anchor(driver_rides(db, r["user_id"]))
+            if anchor:
+                km = haversine_km(anchor["dest_lat"], anchor["dest_lng"], lat, lng)
+                if km <= CHAIN_RADIUS_KM:
+                    cand.append((km, r["user_id"], True))
+    cand.sort()
+    near = [(km, uid) for km, uid, _chain in cand[:30]]
+    for km, uid, chain in cand[:30]:
         where = f" · {pickup}" if pickup else ""
         trip = f" · trajet ≈ {trip_km:.1f} km" if trip_km is not None else ""
-        notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}{trip}", tag=f"req-{rid}", urgent=True)
+        if chain:
+            notify_users(db, [uid], "🙋 Demande sur votre trajet", f"À {km:.1f} km de la destination de votre client actuel{where}{trip}", tag=f"req-{rid}", urgent=True)
+        else:
+            notify_users(db, [uid], "🙋 Nouvelle demande de course", f"À environ {km:.1f} km de votre dernière position{where}{trip}", tag=f"req-{rid}", urgent=True)
     if near and PUSH_REMINDER_DELAYS:
         threading.Thread(target=_remind_drivers, args=(rid, [u for _, u in near]), daemon=True).start()
     return len(near)
@@ -1202,7 +1282,7 @@ def _remind_drivers(rid, driver_ids):
                 return
             marks = ",".join("?" * len(driver_ids))
             still = [x["user_id"] for x in db.execute(
-                f"SELECT user_id FROM drivers WHERE availability='available' AND user_id IN ({marks})", driver_ids).fetchall()]
+                f"SELECT user_id FROM drivers WHERE availability IN ('available','busy') AND user_id IN ({marks})", driver_ids).fetchall()]
             notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}", urgent=True)
         except Exception:
             app.logger.exception("rappel push")
@@ -1241,6 +1321,11 @@ def serialize_request_for_client(db, r):
                FROM users u JOIN drivers d ON d.user_id=u.id WHERE u.id=?""",
             (r["driver_id"],),
         ).fetchone()
+        if d and r["status"] == "accepted":
+            out["queued_behind"] = db.execute(
+                """SELECT COUNT(*) AS n FROM ride_requests WHERE driver_id=? AND status='accepted' AND id!=?
+                   AND (accepted_at<? OR (accepted_at=? AND id<?))""",
+                (r["driver_id"], r["id"], r["accepted_at"], r["accepted_at"], r["id"])).fetchone()["n"]
         if d:
             out["driver"] = {
                 "id": d["id"], "name": d["name"],
@@ -1586,8 +1671,7 @@ def cancel_request(rid):
         return err("Cette demande est déjà terminée.", 409)
     db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE id=?", (ts(), rid))
     if r["driver_id"]:
-        db.execute("UPDATE drivers SET availability='available' WHERE user_id=? AND availability='busy'",
-                   (r["driver_id"],))
+        free_driver_if_idle(db, r["driver_id"])
     db.commit()
     if r["driver_id"]:
         notify_users(db, [r["driver_id"]], "Course annulée", "Le client a annulé sa demande.", tag=f"can-{rid}")
@@ -1601,9 +1685,19 @@ def accept_request(rid):
     d = db.execute("SELECT * FROM drivers WHERE user_id=?", (g.user["id"],)).fetchone()
     if d["approval"] != "approved":
         return err("Votre profil n'est pas encore validé.", 403)
-    if d["availability"] != "available":
-        return err("Passez en « Disponible » pour accepter une demande.", 409)
+    rides = driver_rides(db, g.user["id"])
     expire_requests(db)
+    if rides:   # déjà en course : on peut empiler des demandes proches de la destination du client actuel
+        anchor = chain_anchor(rides)
+        if not anchor:
+            msg = ("Vous avez déjà le maximum de courses en attente." if rides[0]["dest_lat"] is not None
+                   else "Terminez votre course en cours avant d'en accepter une autre (elle n'a pas de destination précise).")
+            return err(msg, 409)
+        cand = db.execute("SELECT lat, lng FROM ride_requests WHERE id=? AND status='open'", (rid,)).fetchone()
+        if cand and chain_km(anchor, cand) > CHAIN_RADIUS_KM:
+            return err(f"Cette demande est à plus de {CHAIN_RADIUS_KM} km de la destination de votre client actuel.", 409)
+    elif d["availability"] != "available":
+        return err("Passez en « Disponible » pour accepter une demande.", 409)
     cur = db.execute(
         "UPDATE ride_requests SET status='accepted', driver_id=?, accepted_at=? "
         "WHERE id=? AND status='open' AND vehicle_type IN ('any', ?)",
@@ -1619,7 +1713,10 @@ def accept_request(rid):
     db.commit()
     row = db.execute("SELECT client_id FROM ride_requests WHERE id=?", (rid,)).fetchone()
     if row:
-        notify_users(db, [row["client_id"]], "✅ Course acceptée", f"{g.user['name']} arrive vers vous. Ouvrez l'application pour le suivre.", tag=f"acc-{rid}")
+        if rides:
+            notify_users(db, [row["client_id"]], "✅ Course acceptée", f"{g.user['name']} termine une première course puis viendra vous chercher. Vous pouvez suivre sa position.", tag=f"acc-{rid}")
+        else:
+            notify_users(db, [row["client_id"]], "✅ Course acceptée", f"{g.user['name']} arrive vers vous. Ouvrez l'application pour le suivre.", tag=f"acc-{rid}")
     return jsonify({"ok": True})
 
 
@@ -1636,7 +1733,7 @@ def release_request(rid):
     if cur.rowcount == 0:
         db.rollback()
         return err("Course introuvable.", 404)
-    db.execute("UPDATE drivers SET availability='available' WHERE user_id=?", (g.user["id"],))
+    free_driver_if_idle(db, g.user["id"])
     db.commit()
     row = db.execute("SELECT client_id FROM ride_requests WHERE id=?", (rid,)).fetchone()
     if row:
@@ -1676,9 +1773,11 @@ def complete_request(rid):
     if r["status"] != "accepted":
         return err("Cette course n'est pas en cours.", 409)
     db.execute("UPDATE ride_requests SET status='completed', closed_at=? WHERE id=?", (ts(), rid))
-    db.execute("UPDATE drivers SET availability='available' WHERE user_id=? AND availability='busy'",
-               (r["driver_id"],))
+    free_driver_if_idle(db, r["driver_id"])
     db.commit()
+    nxt = driver_rides(db, r["driver_id"])
+    if nxt and r["id"] < 10**12:   # la course suivante devient la course en cours : son client est prévenu
+        notify_users(db, [nxt[0]["client_id"]], "🏍️ Votre chauffeur arrive", "Il a terminé sa course précédente et vient maintenant vous chercher.", tag=f"next-{nxt[0]['id']}")
     return jsonify({"ok": True})
 
 
@@ -1945,6 +2044,7 @@ def admin_delete_validator(uid):
     db = get_db()
     if not db.execute("SELECT 1 FROM users WHERE id=? AND role='admin' AND staff_scope='validator'", (uid,)).fetchone():
         return err("Validateur introuvable.", 404)
+    db.execute("DELETE FROM message_files WHERE message_id IN (SELECT id FROM messages WHERE user_id=?)", (uid,))
     for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages"):
         db.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
@@ -2082,6 +2182,7 @@ def admin_delete_user(uid):
     # Courses où elle était chauffeur : l'historique des clients reste, sans le chauffeur
     db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE driver_id=? AND status='accepted'", (ts(), uid))
     db.execute("UPDATE ride_requests SET driver_id=NULL WHERE driver_id=?", (uid,))
+    db.execute("DELETE FROM message_files WHERE message_id IN (SELECT id FROM messages WHERE user_id=?)", (uid,))
     for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages", "drivers"):
         db.execute(f"DELETE FROM {t} WHERE " + ("user_id=?"), (uid,))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
@@ -2287,6 +2388,85 @@ def inbox_unread():
     return jsonify({"unread": n})
 
 
+FILE_KINDS = {  # type MIME accepté -> (genre, libellé par défaut)
+    "image/jpeg": "image", "image/png": "image", "image/webp": "image", "image/gif": "image",
+    "video/mp4": "video", "video/quicktime": "video", "video/webm": "video",
+    "audio/mp4": "audio", "audio/x-m4a": "audio", "audio/aac": "audio", "audio/mpeg": "audio", "audio/webm": "audio", "audio/ogg": "audio",
+    "application/pdf": "pdf",
+}
+FILE_LABEL = {"image": "📷 Photo", "video": "🎬 Vidéo", "audio": "🎤 Message vocal", "pdf": "📄 Document PDF"}
+
+
+def attach_files(db, msgs):
+    """Ajoute à chaque message son fichier joint (sans le contenu)."""
+    ids = [m["id"] for m in msgs]
+    if not ids:
+        return msgs
+    marks = ",".join("?" * len(ids))
+    rows = db.execute(f"SELECT message_id, kind, mime, name, size, state FROM message_files WHERE message_id IN ({marks})", ids).fetchall()
+    by = {r["message_id"]: {"kind": r["kind"], "mime": r["mime"], "name": r["name"], "size": r["size"], "state": r["state"]} for r in rows}
+    for m in msgs:
+        if m["id"] in by:
+            m["file"] = by[m["id"]]
+    return msgs
+
+
+@app.post("/api/admin/conversations/<int:uid>/files")
+@auth_required("admin")
+def admin_send_file(uid):
+    request.max_content_length = FILE_MAX_BYTES + 4096
+    mime = (request.mimetype or "").lower()
+    kind = FILE_KINDS.get(mime)
+    if not kind:
+        return err("Type de fichier non accepté (photo, vidéo, vocal ou PDF).", 415)
+    data = request.get_data()
+    if not data:
+        return err("Fichier vide.")
+    if len(data) > FILE_MAX_BYTES:
+        return err(f"Fichier trop lourd (maximum {FILE_MAX_BYTES // (1024 * 1024)} Mo).", 413)
+    if kind == "pdf" and not data.startswith(b"%PDF"):
+        return err("Ce fichier n'est pas un PDF valide.")
+    db = get_db()
+    u = db.execute("SELECT id FROM users WHERE id=? AND role!='admin'", (uid,)).fetchone()
+    if not u:
+        return err("Utilisateur introuvable.", 404)
+    name = clean(request.args.get("name"), 80) or FILE_LABEL[kind].split(" ", 1)[1]
+    caption = clean_text(request.args.get("caption"), MSG_MAX)
+    label = caption or (f"📄 {name}" if kind == "pdf" else FILE_LABEL[kind])
+    mid = insert(db, "INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)", (uid, "admin", label, ts()))
+    db.execute("INSERT INTO message_files(message_id,kind,mime,name,size,data,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+               (mid, kind, mime, name, len(data), data, "pending", ts()))
+    db.commit()
+    notify_users(db, [uid], "📎 Message de Sunrise Space", label[:120], tag=f"admmsg-{uid}")
+    return jsonify({"ok": True, "id": mid}), 201
+
+
+@app.get("/api/inbox/files/<int:mid>")
+@auth_required("client", "driver")
+def inbox_file(mid):
+    db = get_db()
+    r = db.execute("""SELECT f.mime, f.data, f.state FROM message_files f JOIN messages m ON m.id=f.message_id
+                      WHERE f.message_id=? AND m.user_id=? AND m.sender='admin'""", (mid, g.user["id"])).fetchone()
+    if not r:
+        return err("Fichier introuvable.", 404)
+    if r["state"] != "pending" or r["data"] is None:
+        return err("Ce fichier n'est plus disponible sur le serveur.", 410)
+    resp = Response(bytes(r["data"]), mimetype=r["mime"])
+    resp.headers["Content-Disposition"] = "attachment"
+    return resp
+
+
+@app.post("/api/inbox/files/<int:mid>/ack")
+@auth_required("client", "driver")
+def inbox_file_ack(mid):
+    """Le téléphone a bien reçu le fichier : le serveur l'efface (rien n'est conservé)."""
+    db = get_db()
+    db.execute("""UPDATE message_files SET data=NULL, state='downloaded' WHERE message_id=? AND state='pending'
+                  AND message_id IN (SELECT id FROM messages WHERE user_id=? AND sender='admin')""", (mid, g.user["id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 @app.get("/api/inbox")
 @auth_required("client", "driver")
 def inbox():
@@ -2304,7 +2484,7 @@ def inbox():
         "SELECT id, sender, body, created_at, read_at FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 100",
         (u["id"],),
     ).fetchall()
-    msgs = [dict(m) for m in reversed(msgs)]
+    msgs = attach_files(db, [dict(m) for m in reversed(msgs)])
     for m in msgs:
         m["unread"] = 1 if (m["sender"] == "admin" and not m["read_at"]) else 0
     return jsonify({"announcements": [dict(a) for a in anns], "messages": msgs})
@@ -2419,7 +2599,7 @@ def admin_conversation(uid):
     msgs = db.execute(
         "SELECT id, sender, body, created_at FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,)
     ).fetchall()
-    return jsonify({"user": dict(u), "messages": [dict(m) for m in reversed(msgs)]})
+    return jsonify({"user": dict(u), "messages": attach_files(db, [dict(m) for m in reversed(msgs)])})
 
 
 @app.post("/api/admin/conversations/<int:uid>")
@@ -2433,6 +2613,7 @@ def admin_reply(uid):
         return err("Utilisateur introuvable.", 404)
     db.execute("INSERT INTO messages(user_id,sender,body,created_at) VALUES(?,?,?,?)", (uid, "admin", text, ts()))
     db.commit()
+    notify_users(db, [uid], "✉️ Message de Sunrise Space", text[:120], tag=f"admmsg-{uid}")
     return jsonify({"ok": True}), 201
 
 

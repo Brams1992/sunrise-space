@@ -628,6 +628,7 @@ const NAV_ICONS = {
   inbox: svgI('<rect x="3.5" y="5.5" width="17" height="13" rx="2"/><path d="M4 7l8 6 8-6"/>'),
   account: svgI('<circle cx="12" cy="8" r="4"/><path d="M4.5 20.5c0-3.8 3.4-6 7.5-6s7.5 2.2 7.5 6"/>'),
   stats: svgI('<path d="M5 20V11M12 20V4M19 20v-6"/>'),
+  history: svgI('<path d="M6 3.5h12v17l-3-2-3 2-3-2-3 2z"/><path d="M9 8.5h6M9 12h6"/>'),
   drivers: svgI('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.4"/><path d="M3.3 10.6l6.4 1.2M20.7 10.6l-6.4 1.2M12 14.4V21"/>'),
   users: svgI('<circle cx="9" cy="8" r="3.4"/><path d="M2.8 20c0-3.4 2.8-5.4 6.2-5.4s6.2 2 6.2 5.4"/><circle cx="17" cy="9" r="2.6"/><path d="M17 14.6c2.6 0 4.2 1.6 4.2 4.4"/>'),
   reports: svgI('<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>'),
@@ -648,7 +649,7 @@ function render() {
   if (!state.user) return renderAuth();
   if (state.user.must_change_password) return renderForcedChange();
   if (state.user.role === 'client') return renderShell('client', [['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
-  if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
+  if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['history', '🧾', 'Historique'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin' && state.user.scope === 'validator') return renderShell('validator', [['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Inscrits'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['map', '🗺️', 'Carte'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
 }
@@ -771,7 +772,7 @@ function openTab(role, tab) {
   updateBanner();
   const views = {
     client: { request: clientRequest, inbox: userInbox, account: accountView },
-    driver: { home: driverHome, inbox: userInbox, account: accountView },
+    driver: { home: driverHome, history: driverHistory, inbox: userInbox, account: accountView },
     admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, map: adminMap, reports: adminReports, inbox: adminInbox },
     validator: { drivers: adminDrivers, users: validatorUsers, account: validatorAccount },
   };
@@ -1148,7 +1149,7 @@ async function clientRequest() {
 
   function paint(r) {
     const box = $('#reqbox');
-    const key = r ? `${r.id}:${r.status}` : 'none';
+    const key = r ? `${r.id}:${r.status}:${r.queued_behind || 0}` : 'none';
     if (key === lastKey) {
       const a = $('#age'); if (a && r) a.textContent = ago(r.age_min);
       if (r && r.status === 'accepted' && r.driver) updateClientMap(r, false);  // la moto avance : on met la carte à jour
@@ -1172,7 +1173,8 @@ async function clientRequest() {
         <p class="muted">Demande envoyée <span id="age">${esc(ago(r.age_min))}</span>. Elle expire au bout de 30 minutes.</p>${where}
         <button class="btn btn-ghost btn-block" id="btn-cancel">Annuler la demande</button></section>`;
     } else if (r.status === 'accepted' && r.driver) {
-      box.innerHTML = `<section class="card stack job"><h2>✅ Un chauffeur arrive !</h2>
+      box.innerHTML = `<section class="card stack job"><h2>${r.queued_behind ? '✅ Un chauffeur a accepté' : '✅ Un chauffeur arrive !'}</h2>
+        ${r.queued_behind ? `<div class="banner warn">Votre chauffeur termine d'abord ${r.queued_behind > 1 ? r.queued_behind + ' courses' : 'une course'}, puis viendra vous chercher. Vous pouvez suivre sa position.</div>` : ''}
         <div id="cmap" class="map" aria-label="Carte : votre position et le chauffeur"></div>
         <p id="ceta" class="muted">Recherche du chauffeur sur la carte…</p>${driverBlock(r.driver, r.id)}${where}
         <button class="btn btn-ok btn-block" id="btn-done">J'ai terminé ma course</button>
@@ -1545,6 +1547,22 @@ function updateMaps() {
   if (jobMap.job) refreshJobRoute(false);
 }
 
+async function driverHistory() {
+  $('#main').innerHTML = '<div class="stack"><div class="empty"><p>Chargement…</p></div></div>';
+  let data;
+  try { data = await api('/api/driver/history'); } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); return; }
+  const { rides, stats } = data;
+  const ST = { accepted: ['En cours', 'sun'], completed: ['Terminée', 'ok'], cancelled: ['Annulée', ''] };
+  const when = (r) => { const t = r.closed_at || r.accepted_at || r.created_at || ''; return t ? `${t.slice(8, 10)}/${t.slice(5, 7)}/${t.slice(0, 4)} à ${t.slice(11, 16)}` : ''; };
+  const box = (n, l) => `<div class="card flat" style="text-align:center"><b style="font-size:1.4rem">${n}</b><p class="tiny muted">${l}</p></div>`;
+  $('#main').innerHTML = `<div class="stack"><div class="section-head"><h2>Mon historique</h2></div>
+    <div class="row">${box(stats.today, 'Aujourd\'hui')}${box(stats.week, '7 jours')}${box(stats.completed, 'Terminées')}</div>
+    ${rides.length ? '<div class="list">' + rides.map((r) => `<article class="card item">
+      <h3>${esc(r.client_name)} <span class="chip ${ST[r.status][1]}">${ST[r.status][0]}</span>${r.rating ? `<span class="chip sun">${'★'.repeat(r.rating)}</span>` : ''}</h3>
+      <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.trip_km != null ? `<dt>Trajet</dt><dd>≈ ${kmFr(r.trip_km)} km</dd>` : ''}</dl>
+      <p class="tiny muted">${esc(when(r))}</p></article>`).join('') + '</div>' : empty('🧾', 'Aucune course pour le moment', 'Vos courses acceptées apparaîtront ici.')}</div>`;
+}
+
 async function driverHome() {
   $('#main').innerHTML = '<div id="dhome" class="stack"><div class="empty"><p>Chargement…</p></div></div>';
   let sig = null, last = null, seen = null;
@@ -1554,12 +1572,12 @@ async function driverHome() {
     state.driver = last.driver;
     const a = last.driver.availability;
     const ids = last.requests.map((r) => r.id);
-    if (seen && a === 'available' && !last.job && ids.some((id) => !seen.has(id))) startAlarm();   // nouvelle demande : sirène
-    if (a !== 'available' || !ids.length) stopAlarm();
+    if (seen && (a === 'available' || last.chain.can) && ids.some((id) => !seen.has(id))) startAlarm();   // nouvelle demande : sirène
+    if ((a !== 'available' && !last.chain.can) || !ids.length) stopAlarm();
     seen = new Set(ids);
     if ((a === 'available' || a === 'busy') && !state.locTimer) startLocSharing();
     if (a === 'unavailable' && state.locTimer) stopLocSharing();
-    const s = JSON.stringify([a, last.driver.approval, last.job && last.job.id, last.requests.map((r) => r.id)]);
+    const s = JSON.stringify([a, last.driver.approval, last.job && last.job.id, last.queue.map((r) => r.id), last.requests.map((r) => r.id)]);
     if (force || s !== sig) { sig = s; paint(last); }
     else {  // même contenu : on met à jour distance et ancienneté sans redessiner (la carte reste en place)
       last.requests.forEach((r) => {
@@ -1575,13 +1593,14 @@ async function driverHome() {
     updateMaps();
   }
 
-  function paint({ driver: d, job, requests }) {
+  function paint({ driver: d, job, requests, queue, chain }) {
     let banner = '';
     if (d.approval === 'pending') banner = '<div class="banner warn"><b>Profil en cours de vérification.</b> L\'équipe Sunrise Space contrôle votre plaque et votre permis. Vous pourrez passer « Disponible » dès la validation.</div>';
     if (d.approval === 'rejected') banner = `<div class="banner bad"><b>Profil refusé.</b> ${esc(d.approval_note || 'Contactez le support Sunrise Space.')}</div>`;
     const canToggle = d.approval === 'approved' && d.availability !== 'busy';
     const label = { available: 'Disponible', busy: 'Course en cours', unavailable: 'Indisponible' }[d.availability];
-    const hint = { available: 'Vous recevez les demandes des clients proches.', busy: 'Terminez votre course pour redevenir disponible.', unavailable: 'Vous ne recevez aucune demande.' }[d.availability];
+    const hint = { available: 'Vous recevez les demandes des clients proches, même application fermée (notifications activées).', busy: 'Vous restez en ligne : vous pouvez accepter des demandes proches de la destination de votre client.', unavailable: 'Vous ne recevez aucune demande.' }[d.availability];
+    if (d.approval === 'approved' && d.availability !== 'unavailable' && PUSH_OK && Notification.permission !== 'granted') banner += '<div class="banner warn"><b>Activez les notifications</b> pour recevoir les demandes même application fermée (onglet Compte).</div>';
     let html = `${banner}<section class="card statuscard ${d.availability}">
       <div class="grow"><p class="tiny muted">Mon statut</p><h2>${label}</h2><p class="muted tiny">${hint}</p><p style="margin-top:6px" id="locbadge">${d.availability === 'unavailable' ? '' : locBadge()}</p></div>
       <button class="switch ${d.availability === 'available' ? 'on' : ''}" id="btn-toggle" role="switch" aria-checked="${d.availability === 'available'}" aria-label="Je suis disponible" ${canToggle ? '' : 'disabled'}><span></span></button></section>`;
@@ -1604,6 +1623,17 @@ async function driverHome() {
         <button class="btn btn-ok btn-block" data-act="complete" data-id="${job.id}">Course terminée</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${job.id}">Abandonner</button>
         <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">⚑ Signaler le client</button></div></section>`;
+      if (queue.length) html += `<div class="section-head"><h2>⏳ Courses en attente (${queue.length})</h2></div><div class="list">` + queue.map((q, i) => `<article class="card item">
+          <h3>${i + 1}. ${esc(q.client_name)}</h3>
+          <dl class="kv"><dt>Départ</dt><dd>${esc(q.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(q.destination_text || '—')}</dd></dl>
+          <div class="row"><button class="btn btn-sm grow" data-call="${q.id}">📞 Appeler (Sunrise)</button><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${q.id}">Abandonner</button></div></article>`).join('') + '</div>';
+      if (chain.can || requests.length) {
+        html += `<div class="section-head"><h2>🙋 Demandes sur votre trajet</h2></div><p class="muted tiny">Clients à moins de ${chain.radius_km} km de la destination de votre client actuel. Vous pouvez en garder jusqu'à ${chain.max_queue} en attente.</p>`;
+        html += requests.length ? '<div class="list">' + requests.map((r) => `<article class="card item">
+          <h3>${esc(r.client_name)} <span class="chip sun">${kmFr(r.chain_km)} km de l'arrivée</span></h3>
+          <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd></dl>
+          <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter (après ma course)</button></div></article>`).join('') + '</div>' : '<p class="muted">Aucune demande pour le moment sur votre trajet.</p>';
+      } else if (!chain.has_dest) html += '<p class="tiny muted">Cette course n\'a pas de destination précise : pas de demandes en attente possibles.</p>';
     } else if (d.approval === 'approved') {
       html += '<div class="section-head"><h2>Demandes près de vous</h2></div>';
       if (d.availability !== 'available') html += empty('😴', 'Vous êtes indisponible', 'Passez « Disponible » pour recevoir les demandes des clients proches.');
