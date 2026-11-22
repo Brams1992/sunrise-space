@@ -432,3 +432,9 @@ input, select, textarea { font-size: 16px; }  /* évite le zoom automatique de l
 button, a.btn, .chip, .bottomnav button { -webkit-tap-highlight-color: transparent; }
 .btn:focus-visible, .switch:focus-visible { outline: 3px solid var(--night-2); outline-offset: 2px; }
 @media (prefers-reduced-motion: reduce) { .btn, .switch, .switch span { transition: none; } .btn:active { transform: none; } }
+
+/* ---------- Mentions légales, champ anti-robot ---------- */
+.hp { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
+.legal { font-size: .8rem; line-height: 1.4; margin: 2px 0 0; opacity: .9; }
+.legal a, .legal-links a { color: inherit; text-decoration: underline; }
+.legal-links { display: block; margin-top: 6px; font-size: .82rem; opacity: .85; }

@@ -835,6 +835,8 @@ function renderAuth() {
             <p class="banner warn">Votre profil sera vérifié par l'équipe Sunrise Space (plaque, permis) avant d'apparaître aux clients.</p>
           </div>
           <p class="banner bad" id="auth-error" role="alert" hidden></p>
+          <div class="hp" aria-hidden="true"><label>Ne pas remplir<input name="website" type="text" tabindex="-1" autocomplete="off"></label></div>
+          <p class="legal" id="auth-legal" hidden>En créant un compte, vous acceptez les <a href="/conditions" target="_blank" rel="noopener">conditions d'utilisation</a> et la <a href="/confidentialite" target="_blank" rel="noopener">politique de confidentialité</a>.</p>
           <button class="btn btn-block" id="auth-submit" type="submit">Se connecter</button>
         </form>
         </section>
@@ -845,6 +847,7 @@ function renderAuth() {
         </ul>
         <div class="auth-foot">
           <a href="/bienvenue.html">Qui sommes-nous ? Pourquoi nous faire confiance</a>
+          <span class="legal-links"><a href="/confidentialite" target="_blank" rel="noopener">Confidentialité</a> · <a href="/conditions" target="_blank" rel="noopener">Conditions</a></span>
           ${installButtonHTML()}
         </div>
       </div>
@@ -861,6 +864,7 @@ function renderAuth() {
     $('#auth-submit').textContent = reg ? 'Créer mon compte' : 'Se connecter';
     $('#auth-sub').textContent = reg ? 'Créez votre compte en une minute.' : 'Bon retour. Connectez-vous pour demander ou recevoir une course.';
     $('#forgot').hidden = reg;
+    $('#auth-legal').hidden = !reg;
     form.password.autocomplete = reg ? 'new-password' : 'current-password';
     err.hidden = true;
   };
@@ -892,7 +896,7 @@ function renderAuth() {
       if (mode === 'login') {
         data = await api('/api/auth/login', { method: 'POST', body: { phone: form.phone.value, password: form.password.value } });
       } else {
-        const body = { role, name: form.name.value, phone: form.phone.value, password: form.password.value };
+        const body = { role, name: form.name.value, phone: form.phone.value, password: form.password.value, website: form.website.value };
         if (role === 'driver') body.driver = { vehicle_type: form.vehicle_type.value, plate: form.plate.value, permis: form.permis.value, moto_model: form.moto_model.value, commune: form.commune.value, whatsapp: form.whatsapp.value };
         data = await api('/api/auth/register', { method: 'POST', body });
       }
@@ -1007,6 +1011,7 @@ function accountView() {
       </dl>
       ${installButtonHTML()}
       ${pushAccountHTML()}
+      <p class="muted tiny"><a href="/confidentialite" target="_blank" rel="noopener">Confidentialité</a> · <a href="/conditions" target="_blank" rel="noopener">Conditions d'utilisation</a></p>
       ${state.user && state.user.role === 'driver' ? `<div class="row"><button class="btn btn-ghost grow" id="btn-alarm">${alarmEnabled() ? '🔊 Sirène des demandes : activée' : '🔇 Sirène des demandes : coupée'}</button><button class="btn btn-ghost btn-sm" id="btn-alarm-test">Tester</button></div>` : ''}
       <button class="btn btn-ghost btn-block" id="btn-pw">🔒 Changer mon mot de passe</button>
       <button class="btn btn-dark btn-block" id="btn-logout">Se déconnecter</button>

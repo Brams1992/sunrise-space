@@ -20,7 +20,7 @@ from urllib.parse import urlsplit, urlencode
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-from flask import Flask, Request, Response, g, jsonify, request, send_from_directory
+from flask import Flask, Request, Response, g, jsonify, redirect, request, send_from_directory
 from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -87,6 +87,8 @@ class AppRequest(Request):
 
 
 app = Flask(__name__, static_folder=None)  # fichiers servis par la liste blanche ci-dessous
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)   # derrière Render : vraie adresse IP du visiteur, https
 app.request_class = AppRequest
 app.config["MAX_CONTENT_LENGTH"] = 64 * 1024  # corps de requête limité
 
@@ -603,6 +605,15 @@ def driver_profile(db, user_id):
     }
 
 
+@app.before_request
+def force_https():
+    """En production (derrière Render), tout passe en https : un visiteur arrivé en http est redirigé."""
+    if request.headers.get("X-Forwarded-Proto") == "http" and not app.debug:
+        host = (request.host or "").split(":")[0]
+        if host not in ("localhost", "127.0.0.1"):
+            return redirect(request.url.replace("http://", "https://", 1), code=301)
+
+
 @app.after_request
 def security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
@@ -617,29 +628,84 @@ def security_headers(resp):
         "media-src 'self' blob:; connect-src 'self' https://router.project-osrm.org; manifest-src 'self'; worker-src 'self'; "
         "frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
     )
+    if request.is_secure:
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     if request.path.startswith("/api/"):
         resp.headers["Cache-Control"] = "no-store"
     elif request.path in ("/sw.js", "/"):
         resp.headers["Cache-Control"] = "no-cache"
+    return compress(resp)
+
+
+GZIP_TYPES = ("text/html", "text/css", "text/plain", "text/xml", "application/javascript", "text/javascript",
+              "application/json", "application/manifest+json", "application/xml", "image/svg+xml")
+
+
+def compress(resp):
+    """Compresse le texte (HTML, JS, CSS, JSON) : les pages se chargent plus vite sur une connexion faible."""
+    try:
+        if resp.status_code != 200 or "gzip" not in request.headers.get("Accept-Encoding", "") \
+                or resp.headers.get("Content-Encoding") or resp.mimetype not in GZIP_TYPES:
+            return resp
+        resp.direct_passthrough = False
+        data = resp.get_data()
+        if len(data) < 800:
+            return resp
+        import gzip
+        packed = gzip.compress(data, 6)
+        resp.set_data(packed)
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers.add("Vary", "Accept-Encoding")
+        resp.headers.pop("ETag", None)
+        resp.headers["Content-Length"] = str(len(packed))
+    except Exception:
+        app.logger.exception("compression")
     return resp
 
 
 # --- Pages / méta -------------------------------------------------------------
 PUBLIC_FILES = {
     "index.html", "bienvenue.html", "bienvenue.js", "app.js", "style.css", "sw.js", "manifest.webmanifest",
-    "icon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png",
+    "icon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "favicon-32.png", "og-image.png",
+    "confidentialite.html", "conditions.html", "404.html",
 }
+PAGES = {"bienvenue": "bienvenue.html", "confidentialite": "confidentialite.html", "conditions": "conditions.html"}
 
 
 @app.get("/")
 def index():
-    return send_from_directory(BASE_DIR, "index.html")
+    """Page d'accueil : l'adresse du site (aperçu sur les réseaux sociaux) est celle réellement utilisée."""
+    with open(os.path.join(BASE_DIR, "index.html"), encoding="utf-8") as f:
+        html = f.read().replace("{{BASE}}", request.url_root.rstrip("/"))
+    return Response(html, mimetype="text/html")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return send_from_directory(BASE_DIR, "favicon-32.png", mimetype="image/png")
+
+
+@app.get("/robots.txt")
+def robots():
+    base = request.url_root.rstrip("/")
+    return Response(f"User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: {base}/sitemap.xml\n", mimetype="text/plain")
+
+
+@app.get("/sitemap.xml")
+def sitemap():
+    base = request.url_root.rstrip("/")
+    urls = ["/", "/bienvenue", "/confidentialite", "/conditions"]
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+           + "".join(f"  <url><loc>{base}{u}</loc></url>\n" for u in urls) + "</urlset>\n")
+    return Response(xml, mimetype="application/xml")
 
 
 @app.get("/<name>")
 def public_file(name):
     """Sert uniquement les fichiers de l'interface (jamais app.py ni la base de données)."""
-    if name not in PUBLIC_FILES:
+    if name in PAGES:
+        return send_from_directory(BASE_DIR, PAGES[name])
+    if name not in PUBLIC_FILES or name in ("404.html", "index.html"):
         return not_found(None)
     return send_from_directory(BASE_DIR, name)
 
@@ -682,6 +748,8 @@ def send_welcome(db, uid, role, name):
 @app.post("/api/auth/register")
 def register():
     data = body()
+    if data.get("website"):   # champ piège invisible : seuls les robots le remplissent
+        return err("Inscription refusée.", 400)
     role = data.get("role")
     if role not in ("client", "driver"):
         return err("Choisissez un profil : client ou chauffeur.")
@@ -2622,7 +2690,9 @@ def admin_reply(uid):
 def not_found(_e):
     if request.path.startswith("/api/"):
         return err("Ressource introuvable.", 404)
-    return send_from_directory(BASE_DIR, "index.html")
+    resp = send_from_directory(BASE_DIR, "404.html")
+    resp.status_code = 404
+    return resp
 
 
 @app.errorhandler(413)

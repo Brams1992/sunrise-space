@@ -792,6 +792,45 @@ class TestSunrise(Base):
         self.assertEqual((h["stats"]["completed"], h["stats"]["today"]), (1, 1))
         self.assertNotIn("0707070707", str(h))
 
+    def test_site_hygiene(self):
+        import re as _re
+        # pages légales, robots, sitemap, favicon, image d'aperçu
+        for path in ("/confidentialite", "/conditions", "/bienvenue", "/bienvenue.html", "/favicon.ico", "/og-image.png", "/favicon-32.png"):
+            self.assertEqual(self.c.get(path).status_code, 200, path)
+        self.assertIn("Disallow: /api/", self.c.get("/robots.txt").get_data(as_text=True))
+        sm = self.c.get("/sitemap.xml").get_data(as_text=True)
+        self.assertIn("/confidentialite</loc>", sm)
+        # page d'accueil : adresse réelle dans les balises de partage
+        home = self.c.get("/", base_url="https://exemple.test").get_data(as_text=True)
+        self.assertIn('og:image" content="https://exemple.test/og-image.png"', home)
+        self.assertNotIn("{{BASE}}", home)
+        # vraie page 404 (statut 404, pas la page d'accueil), l'API reste en JSON
+        r = self.c.get("/n-existe-pas")
+        self.assertEqual(r.status_code, 404)
+        self.assertIn("Cette page n'existe pas", r.get_data(as_text=True))
+        self.assertEqual(self.c.get("/api/nimporte").status_code, 404)
+        self.assertEqual(self.c.get("/app.py").status_code, 404)
+        # https forcé derrière le proxy, HSTS en https
+        r = self.c.get("/", headers={"X-Forwarded-Proto": "http", "Host": "sunrise.example"})
+        self.assertEqual((r.status_code, r.headers["Location"]), (301, "https://sunrise.example/"))
+        r = self.c.get("/", headers={"X-Forwarded-Proto": "https"})
+        self.assertIn("max-age", r.headers.get("Strict-Transport-Security", ""))
+        # compression
+        r = self.c.get("/app.js", headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(r.headers.get("Content-Encoding"), "gzip")
+        import gzip as _gz
+        self.assertIn(b"renderShell", _gz.decompress(r.data))
+        self.assertIsNone(self.c.get("/app.js").headers.get("Content-Encoding"))
+        # champ piège anti-robot
+        r = self.call("post", "/api/auth/register", json={"role": "client", "name": "Bot Spam", "phone": "0707070700", "password": "secret1", "website": "http://spam"})
+        self.assertEqual(r.status_code, 400)
+        # aucun lien interne cassé dans les pages publiques
+        for page in ("/", "/bienvenue", "/confidentialite", "/conditions"):
+            for href in _re.findall(r'href="(/[^"#?]*)"', self.c.get(page).get_data(as_text=True)):
+                self.assertEqual(self.c.get(href).status_code, 200, f"{page} -> {href}")
+        # chaque page légale annonce son titre
+        self.assertIn("Politique de confidentialité", self.c.get("/confidentialite").get_data(as_text=True))
+
     def test_admin_map(self):
         admin = self.login("0700000000", "admin-secret")
         client, cid = self.register("client", "Awa Koné", "0707070707")
