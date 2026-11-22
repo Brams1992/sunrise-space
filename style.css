@@ -422,3 +422,13 @@ input::placeholder, textarea::placeholder { color: #8A94A6; }
 .pn.off, .lg.off { background: #7B8494; }
 .pn.cli, .lg.cli { background: #2F6FDB; }
 .amk .pn.me { width: 46px; height: 46px; background: var(--sun); color: #1b1000; font-size: .8rem; border-color: var(--night); }
+
+/* ---------- Design system : corrections d'accessibilité ---------- */
+.chip.ok { color: #0F5F36; }                 /* 4,3 -> 6,9 sur fond vert clair */
+.chip.bad { color: #8C2020; }                /* 4,4 -> 7,1 sur fond rouge clair */
+.ico { flex: none; vertical-align: -3px; }
+.btn .ico { margin-right: 2px; }
+input, select, textarea { font-size: 16px; }  /* évite le zoom automatique de l'iPhone */
+button, a.btn, .chip, .bottomnav button { -webkit-tap-highlight-color: transparent; }
+.btn:focus-visible, .switch:focus-visible { outline: 3px solid var(--night-2); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .btn, .switch, .switch span { transition: none; } .btn:active { transform: none; } }

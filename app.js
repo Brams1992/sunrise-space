@@ -621,6 +621,15 @@ function pushAccountHTML() {
 }
 
 /* Icônes de navigation (traits fins, même famille) */
+/* Icônes en trait (même famille que la navigation) pour les boutons */
+const IC = {
+  phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/>',
+  compass: '<circle cx="12" cy="12" r="9"/><path d="M15.5 8.5l-2 5-5 2 2-5z"/>',
+  check: '<path d="M4.5 12.5l5 5 10-11"/>',
+  flag: '<path d="M6 21V4M6 5h11l-2 4 2 4H6"/>',
+};
+const ic = (n) => `<svg class="ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n]}</svg>`;
+
 const svgI = (d) => `<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 const NAV_ICONS = {
   request: svgI('<path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/>'),
@@ -727,7 +736,7 @@ function adminMap() {
   });
   map.on('popupclose', () => { popupOpen = false; });
   const st = { available: ['avail', 'disponible'], busy: ['busy', 'en course'], unavailable: ['off', 'indisponible'] };
-  const popup = (u, kind, extra) => `<b>${esc(u.name)}</b><br><span class="muted">${kind}${extra || ''}</span><br><span class="muted">${esc(fmtPhone(u.phone))} · vu ${ago(u.seen_min)}</span><br><span class="muted">position ${ago(u.pos_min)}</span><div style="margin-top:8px"><button class="btn btn-sm btn-block" data-callu="${u.id}" data-name="${esc(u.name)}">📞 Appeler (Sunrise)</button></div>`;
+  const popup = (u, kind, extra) => `<b>${esc(u.name)}</b><br><span class="muted">${kind}${extra || ''}</span><br><span class="muted">${esc(fmtPhone(u.phone))} · vu ${ago(u.seen_min)}</span><br><span class="muted">position ${ago(u.pos_min)}</span><div style="margin-top:8px"><button class="btn btn-sm btn-block" data-callu="${u.id}" data-name="${esc(u.name)}">${ic('phone')} Appeler (Sunrise)</button></div>`;
   async function load() {
     if (popupOpen || state.map !== map) return;
     try {
@@ -1143,7 +1152,7 @@ async function clientRequest() {
   function driverBlock(d, rid) {
     return `<div class="card flat">
       <div class="row"><div class="avatar" aria-hidden="true">🏍️</div><div class="grow"><h3>${esc(d.name)}</h3><p class="muted">${esc(d.moto_model || veh(d.vehicle_type).label)} · ${esc(d.plate)}</p>${d.rating_avg != null ? `<p class="tiny muted">${starsText(d.rating_avg, d.rating_count)}</p>` : ''}</div></div>
-      <div class="row" style="margin-top:10px"><button class="btn btn-sm btn-block" data-call="${rid}">📞 Appeler le chauffeur (Sunrise)</button></div>
+      <div class="row" style="margin-top:10px"><button class="btn btn-sm btn-block" data-call="${rid}">${ic('phone')} Appeler le chauffeur (Sunrise)</button></div>
       <p class="tiny muted">🔒 Les numéros de téléphone restent privés : l'appel passe par Sunrise.</p></div>`;
   }
 
@@ -1179,12 +1188,12 @@ async function clientRequest() {
         <p id="ceta" class="muted">Recherche du chauffeur sur la carte…</p>${driverBlock(r.driver, r.id)}${where}
         <button class="btn btn-ok btn-block" id="btn-done">J'ai terminé ma course</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" id="btn-cancel">Annuler</button>
-        <button class="btn btn-ghost btn-sm grow" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">⚑ Signaler</button></div></section>`;
+        <button class="btn btn-ghost btn-sm grow" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">${ic('flag')} Signaler</button></div></section>`;
     } else {
       const label = { completed: ['🎉', 'Course terminée', 'Merci d\'avoir utilisé Sunrise Space.'], cancelled: ['✖️', 'Demande annulée', ''], expired: ['⌛', 'Demande expirée', "Aucun chauffeur n'a pu la prendre. Réessayez."] }[r.status] || ['', '', ''];
       box.innerHTML = `<section class="card stack"><div class="empty"><div class="big">${label[0]}</div><h3>${label[1]}</h3><p>${esc(label[2])}</p></div>
         ${r.status === 'completed' && r.driver ? ratingHTML(r) : ''}
-        ${r.status === 'completed' && r.driver ? `<button class="btn btn-ghost btn-sm" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">⚑ Signaler ce chauffeur</button>` : ''}
+        ${r.status === 'completed' && r.driver ? `<button class="btn btn-ghost btn-sm" data-report="${r.driver.id}" data-name="${esc(r.driver.name)}">${ic('flag')} Signaler ce chauffeur</button>` : ''}
         <button class="btn btn-block" id="btn-new">Nouvelle demande</button></section>`;
       const nb = $('#btn-new'); if (nb) nb.onclick = () => { lastKey = null; paint(null); };
     }
@@ -1609,30 +1618,30 @@ async function driverHome() {
       html += `<section class="card job stack"><h2>🛵 Course en cours</h2>
         <dl class="kv"><dt>Client</dt><dd>${esc(job.client_name)}</dd><dt>Départ</dt><dd>${esc(job.pickup_text || 'Position GPS du client (voir la carte)')}</dd><dt>Destination</dt><dd>${esc(job.destination_text || '—')}</dd>
         ${job.note ? `<dt>Précision</dt><dd>${esc(job.note)}</dd>` : ''}${job.distance_km != null ? `<dt>Distance</dt><dd>${fmtDist(job.distance_km)}</dd>` : ''}</dl>
-        <button class="btn btn-sm btn-block" data-call="${job.id}">📞 Appeler le client (Sunrise)</button>
+        <button class="btn btn-sm btn-block" data-call="${job.id}">${ic('phone')} Appeler le client (Sunrise)</button>
         <p class="tiny muted">🔒 Le numéro du client reste privé : l'appel passe par Sunrise.</p>
         ${hasDest(job) ? `<div class="seg" id="phaseseg" role="group" aria-label="Étape de la course"><button type="button" data-ph="pickup" aria-pressed="true">① Rejoindre le client</button><button type="button" data-ph="dest" aria-pressed="false">② Aller à la destination</button></div>` : ''}
         <div id="jobmap" class="map" aria-label="Carte : votre position, le client et la destination"></div>
         <p id="jobeta" class="muted">Calcul de l'itinéraire…</p>
         <p id="jobtrip" class="muted"></p>
         <p id="navtarget" class="tiny muted"></p>
-        <div class="row"><a id="lnk-apple" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">🧭 Plans (Apple)</a>
-          <a id="lnk-google" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">🧭 Google Maps</a></div>
+        <div class="row"><a id="lnk-apple" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${appleLink(job.lat, job.lng)}">${ic('compass')} Plans (Apple)</a>
+          <a id="lnk-google" class="btn btn-dark btn-sm grow" target="_blank" rel="noopener" href="${mapsLink(job.lat, job.lng)}">${ic('compass')} Google Maps</a></div>
         ${!hasDest(job) && job.destination_text ? `<div class="row"><a class="btn btn-ghost btn-sm grow" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=${encodeURIComponent(job.destination_text + ', Côte d\'Ivoire')}&dirflg=d">🏁 Destination : Plans</a>
           <a class="btn btn-ghost btn-sm grow" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(job.destination_text + ', Côte d\'Ivoire')}">🏁 Destination : Google</a></div>` : ''}
         <button class="btn btn-ok btn-block" data-act="complete" data-id="${job.id}">Course terminée</button>
         <div class="row"><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${job.id}">Abandonner</button>
-        <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">⚑ Signaler le client</button></div></section>`;
+        <button class="btn btn-ghost btn-sm grow" data-act="report" data-cid="${job.client_id || ''}" data-name="${esc(job.client_name)}" data-id="${job.id}">${ic('flag')} Signaler le client</button></div></section>`;
       if (queue.length) html += `<div class="section-head"><h2>⏳ Courses en attente (${queue.length})</h2></div><div class="list">` + queue.map((q, i) => `<article class="card item">
           <h3>${i + 1}. ${esc(q.client_name)}</h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(q.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(q.destination_text || '—')}</dd></dl>
-          <div class="row"><button class="btn btn-sm grow" data-call="${q.id}">📞 Appeler (Sunrise)</button><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${q.id}">Abandonner</button></div></article>`).join('') + '</div>';
+          <div class="row"><button class="btn btn-sm grow" data-call="${q.id}">${ic('phone')} Appeler (Sunrise)</button><button class="btn btn-ghost btn-sm grow" data-act="release" data-id="${q.id}">Abandonner</button></div></article>`).join('') + '</div>';
       if (chain.can || requests.length) {
         html += `<div class="section-head"><h2>🙋 Demandes sur votre trajet</h2></div><p class="muted tiny">Clients à moins de ${chain.radius_km} km de la destination de votre client actuel. Vous pouvez en garder jusqu'à ${chain.max_queue} en attente.</p>`;
         html += requests.length ? '<div class="list">' + requests.map((r) => `<article class="card item">
           <h3>${esc(r.client_name)} <span class="chip sun">${kmFr(r.chain_km)} km de l'arrivée</span></h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd></dl>
-          <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter (après ma course)</button></div></article>`).join('') + '</div>' : '<p class="muted">Aucune demande pour le moment sur votre trajet.</p>';
+          <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">${ic('check')} Accepter (après ma course)</button></div></article>`).join('') + '</div>' : '<p class="muted">Aucune demande pour le moment sur votre trajet.</p>';
       } else if (!chain.has_dest) html += '<p class="tiny muted">Cette course n\'a pas de destination précise : pas de demandes en attente possibles.</p>';
     } else if (d.approval === 'approved') {
       html += '<div class="section-head"><h2>Demandes près de vous</h2></div>';
@@ -1642,7 +1651,7 @@ async function driverHome() {
           <h3>${esc(r.client_name)} <span class="chip sun" id="rq-d-${r.id}">${fmtDist(r.distance_km)}</span>${r.vehicle_type && r.vehicle_type !== 'any' ? `<span class="chip">Demande : ${veh(r.vehicle_type).icon} ${esc(veh(r.vehicle_type).short)}</span>` : ''}</h3>
           <dl class="kv"><dt>Départ</dt><dd>${esc(r.pickup_text || 'Position du client')}</dd><dt>Destination</dt><dd>${esc(r.destination_text || '—')}</dd>${r.trip_km != null ? `<dt>Trajet</dt><dd>🏁 environ ${kmFr(r.trip_km)} km <span class="tiny muted">(à vol d'oiseau)</span></dd>` : ''}${r.note ? `<dt>Précision</dt><dd>${esc(r.note)}</dd>` : ''}</dl>
           <p class="tiny muted" id="rq-a-${r.id}">Demandé ${esc(ago(r.age_min))}</p>
-          <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">✅ Accepter la course</button></div></article>`).join('') + '</div>';
+          <div class="actions"><button class="btn grow" data-act="accept" data-id="${r.id}">${ic('check')} Accepter la course</button></div></article>`).join('') + '</div>';
     }
     destroyMap();
     $('#dhome').innerHTML = html;
@@ -1809,7 +1818,7 @@ async function adminStats() {
   async function loadOnline() {
     try {
       const o = await api('/api/admin/online');
-      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span> <button class="btn btn-sm" data-callu="${u.id}" data-name="${esc(u.name)}" aria-label="Appeler ${esc(u.name)} dans l'application">📞 Appeler</button></li>`;
+      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span> <button class="btn btn-sm" data-callu="${u.id}" data-name="${esc(u.name)}" aria-label="Appeler ${esc(u.name)} dans l'application">${ic('phone')} Appeler</button></li>`;
       const dst = { available: ' · 🟢 disponible', busy: ' · 🔴 en course', unavailable: ' · ⚪ indisponible' };
       $('#online').innerHTML = `<section class="card stack"><h3>🟢 En ligne maintenant</h3>
         <p class="muted tiny">Application ouverte à l'écran dans les 3 dernières minutes.</p>
@@ -1932,9 +1941,9 @@ async function adminDrivers() {
         <dl class="kv"><dt>Téléphone</dt><dd>${esc(fmtPhone(d.phone))}</dd><dt>Véhicule</dt><dd>${veh(d.vehicle_type).icon} ${esc(veh(d.vehicle_type).label)}${d.moto_model ? ' · ' + esc(d.moto_model) : ''} · ${esc(d.plate)}</dd>
         <dt>Permis</dt><dd>${esc(d.permis)}</dd><dt>Commune</dt><dd>${esc(d.commune)}</dd></dl>
         <div class="actions">
-          ${d.approval !== 'approved' ? `<button class="btn btn-ok btn-sm" data-ap="approved" data-id="${d.id}">✅ Valider</button>` : ''}
+          ${d.approval !== 'approved' ? `<button class="btn btn-ok btn-sm" data-ap="approved" data-id="${d.id}">${ic('check')} Valider</button>` : ''}
           ${d.approval !== 'rejected' ? `<button class="btn btn-danger btn-sm" data-ap="rejected" data-id="${d.id}">Refuser</button>` : ''}
-          <a class="btn btn-ghost btn-sm" href="tel:+225${esc(d.phone)}">📞 Appeler</a></div></article>`).join('')
+          <a class="btn btn-ghost btn-sm" href="tel:+225${esc(d.phone)}">${ic('phone')} Appeler</a></div></article>`).join('')
         : empty('✅', 'Rien ici', 'Aucun chauffeur dans cette catégorie.');
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
