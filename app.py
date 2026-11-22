@@ -112,6 +112,10 @@ CREATE TABLE IF NOT EXISTS drivers(
   availability TEXT NOT NULL DEFAULT 'unavailable' CHECK(availability IN ('available','busy','unavailable')),
   lat REAL, lng REAL, location_at TEXT
 );
+CREATE TABLE IF NOT EXISTS user_positions(
+  user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  lat REAL NOT NULL, lng REAL NOT NULL, at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS password_resets(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1742,6 +1746,54 @@ def admin_stats():
         "avg_rating": (lambda v: round(float(v), 1) if v is not None else None)(one("SELECT AVG(rating) FROM ride_requests WHERE rating IS NOT NULL")),
         "password_resets_open": one("SELECT COUNT(*) FROM password_resets WHERE status='open'"),
     })
+
+
+@app.post("/api/me/location")
+@auth_required("client")
+def client_location():
+    """Position du client tant que son application est ouverte : visible UNIQUEMENT par l'administrateur (carte)."""
+    coords = get_coords(body())
+    if not coords:
+        return err("Position invalide.")
+    db = get_db()
+    if db.execute("SELECT 1 FROM user_positions WHERE user_id=?", (g.user["id"],)).fetchone():
+        db.execute("UPDATE user_positions SET lat=?, lng=?, at=? WHERE user_id=?", (coords[0], coords[1], ts(), g.user["id"]))
+    else:
+        db.execute("INSERT INTO user_positions(user_id,lat,lng,at) VALUES(?,?,?,?)", (g.user["id"], coords[0], coords[1], ts()))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/map")
+@auth_required("admin")
+def admin_map():
+    """Carte : chauffeurs et clients connectés (application ouverte) avec leur dernière position connue."""
+    db = get_db()
+    since = ts(now() - timedelta(minutes=ONLINE_WINDOW_MIN))
+    pos_fresh = ts(now() - timedelta(minutes=LOCATION_TTL_MIN * 3))
+    drivers, clients, hidden = [], [], 0
+    rows = db.execute(
+        """SELECT u.id, u.name, u.phone, u.last_seen_at, d.vehicle_type, d.availability, d.approval, d.lat, d.lng, d.location_at
+           FROM users u JOIN drivers d ON d.user_id=u.id
+           WHERE u.role='driver' AND u.is_blocked=0 AND u.last_seen_at>=? ORDER BY u.last_seen_at DESC LIMIT 400""", (since,)).fetchall()
+    for r in rows:
+        if r["lat"] is None or not r["location_at"] or r["location_at"] < pos_fresh:
+            hidden += 1
+            continue
+        drivers.append({"id": r["id"], "name": r["name"], "phone": r["phone"], "lat": r["lat"], "lng": r["lng"],
+                        "vehicle_type": r["vehicle_type"], "availability": r["availability"], "approval": r["approval"],
+                        "seen_min": minutes_ago(r["last_seen_at"]), "pos_min": minutes_ago(r["location_at"])})
+    rows = db.execute(
+        """SELECT u.id, u.name, u.phone, u.last_seen_at, p.lat, p.lng, p.at
+           FROM users u LEFT JOIN user_positions p ON p.user_id=u.id
+           WHERE u.role='client' AND u.is_blocked=0 AND u.last_seen_at>=? ORDER BY u.last_seen_at DESC LIMIT 400""", (since,)).fetchall()
+    for r in rows:
+        if r["lat"] is None or r["at"] < pos_fresh:
+            hidden += 1
+            continue
+        clients.append({"id": r["id"], "name": r["name"], "phone": r["phone"], "lat": r["lat"], "lng": r["lng"],
+                        "seen_min": minutes_ago(r["last_seen_at"]), "pos_min": minutes_ago(r["at"])})
+    return jsonify({"drivers": drivers, "clients": clients, "without_position": hidden})
 
 
 @app.get("/api/admin/online")

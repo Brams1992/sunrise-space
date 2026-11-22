@@ -140,3 +140,7 @@ Boutons de l'admin : « Nouveau mot de passe » (il est déconnecté) et « Reti
 - Le serveur ne fait que relayer la mise en relation ; la voix passe directement d'un téléphone à l'autre (WebRTC). Une notification urgente prévient l'autre personne.
 - Variables facultatives pour les réseaux difficiles (serveur TURN) : `TURN_URLS` (ex. `turn:host:3478`), `TURN_USERNAME`, `TURN_CREDENTIAL`, ou `CALL_ICE_SERVERS` (JSON).
 - Limites : l'application doit être ouverte pour sonner ; le micro doit être autorisé.
+
+## Carte de l'administrateur
+- Onglet **Carte** : chauffeurs et clients dont l'application est ouverte (vus dans les 3 dernières minutes), avec leur dernière position connue ; « Moi » = position de l'administrateur. Touchez une pastille pour voir le détail et appeler (Sunrise).
+- La position d'un client est envoyée toutes les minutes tant que son application est ouverte (`POST /api/me/location`, table `user_positions`, hors sauvegardes). Seul l'administrateur y a accès (`GET /api/admin/map`).

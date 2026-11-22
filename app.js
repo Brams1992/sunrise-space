@@ -202,18 +202,19 @@ function bindPosControls() {
 // Fond de carte : le client voit par défaut l'image satellite (avec noms de lieux et routes) pour mieux reconnaître les lieux ; bouton pour revenir au plan.
 function addBase(map) {
   const plan = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' });
-  if (!state.user || state.user.role !== 'client') { plan.addTo(map); return; }
+  if (!state.user || !['client', 'admin'].includes(state.user.role)) { plan.addTo(map); return; }
+  const key = 'ss_basemap_' + state.user.role;
   const esri = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
   const sat = L.layerGroup([
     L.tileLayer(esri + 'World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Imagerie © Esri' }),
     L.tileLayer(esri + 'Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
     L.tileLayer(esri + 'Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19 }),
   ]);
-  let saved = 'sat';
-  try { saved = localStorage.getItem('ss_basemap') || 'sat'; } catch (_) { /* stockage indisponible */ }
+  let saved = state.user.role === 'admin' ? 'plan' : 'sat';
+  try { saved = localStorage.getItem(key) || saved; } catch (_) { /* stockage indisponible */ }
   (saved === 'plan' ? plan : sat).addTo(map);
   L.control.layers({ '🛰️ Satellite': sat, '🗺️ Plan': plan }, null, { position: 'topright', collapsed: false }).addTo(map);
-  map.on('baselayerchange', (e) => { try { localStorage.setItem('ss_basemap', e.layer === plan ? 'plan' : 'sat'); } catch (_) { /* ignoré */ } });
+  map.on('baselayerchange', (e) => { try { localStorage.setItem(key, e.layer === plan ? 'plan' : 'sat'); } catch (_) { /* ignoré */ } });
 }
 
 function setupMap(elId) {
@@ -499,6 +500,20 @@ async function checkIncomingCall() {
   } catch { /* rien */ }
 }
 
+/* Tant que l'application du client est ouverte, sa position est transmise (visible par l'administrateur seulement). */
+function sendPresence() {
+  if (!state.user || state.user.role !== 'client' || document.hidden || !navigator.geolocation) return;
+  navigator.geolocation.getCurrentPosition((p) => {
+    if (p.coords.accuracy > 500) return;
+    api('/api/me/location', { method: 'POST', body: { lat: p.coords.latitude, lng: p.coords.longitude } }).catch(() => {});
+  }, () => {}, { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 });
+}
+function startPresence() {
+  clearInterval(state.posTimer);
+  state.posTimer = setInterval(sendPresence, 60000);
+  sendPresence();
+}
+
 function startCallWatcher() {
   clearInterval(state.callTimer);
   state.callTimer = setInterval(checkIncomingCall, 3000);
@@ -616,6 +631,7 @@ const NAV_ICONS = {
   drivers: svgI('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.4"/><path d="M3.3 10.6l6.4 1.2M20.7 10.6l-6.4 1.2M12 14.4V21"/>'),
   users: svgI('<circle cx="9" cy="8" r="3.4"/><path d="M2.8 20c0-3.4 2.8-5.4 6.2-5.4s6.2 2 6.2 5.4"/><circle cx="17" cy="9" r="2.6"/><path d="M17 14.6c2.6 0 4.2 1.6 4.2 4.4"/>'),
   reports: svgI('<path d="M5 21V4M5 4h12l-2 4 2 4H5"/>'),
+  map: svgI('<path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2z"/><path d="M9 4v14M15 6v14"/>'),
 };
 const FEAT_ICONS = {
   pin: svgI('<path d="M12 21s7-6.2 7-12a7 7 0 1 0-14 0c0 5.8 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/>'),
@@ -634,7 +650,7 @@ function render() {
   if (state.user.role === 'client') return renderShell('client', [['request', '🛵', 'Ma demande'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'driver') return renderShell('driver', [['home', '🏍️', 'Accueil'], ['inbox', '✉️', 'Messages'], ['account', '👤', 'Compte']]);
   if (state.user.role === 'admin' && state.user.scope === 'validator') return renderShell('validator', [['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Inscrits'], ['account', '👤', 'Compte']]);
-  if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
+  if (state.user.role === 'admin') return renderShell('admin', [['stats', '📊', 'Aperçu'], ['drivers', '🏍️', 'Chauffeurs'], ['users', '👥', 'Utilisateurs'], ['map', '🗺️', 'Carte'], ['reports', '⚑', 'Signalements'], ['inbox', '✉️', 'Messages']]);
 }
 
 function renderShell(role, tabs) {
@@ -663,6 +679,7 @@ function renderShell(role, tabs) {
   syncPush();
   refreshUnread();
   if (role === 'client' || role === 'driver') startCallWatcher();
+  if (role === 'client') startPresence();
   state.unreadTimer = setInterval(() => { if (!document.hidden) refreshUnread(); }, 25000);
 }
 
@@ -689,6 +706,62 @@ async function refreshUnread() {
   } catch { /* on réessaiera */ }
 }
 
+/* ---------- Carte de l'administrateur : chauffeurs et clients connectés ---------- */
+function adminMap() {
+  $('#main').innerHTML = `<div class="amap-wrap"><div id="amap"></div>
+    <div class="mapcount" id="mcount" aria-live="polite">Chargement…</div>
+    <button class="maplocate" id="mloc" type="button" aria-label="Me situer sur la carte"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3.5"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></button>
+    <ul class="maplegend"><li><i class="lg avail"></i>Chauffeur disponible</li><li><i class="lg busy"></i>En course</li><li><i class="lg off"></i>Indisponible</li><li><i class="lg cli"></i>Client</li></ul></div>`;
+  if (!window.L) { $('#amap').innerHTML = '<div class="map-fallback">Carte indisponible. Vérifiez votre connexion.</div>'; $('#mcount').remove(); return; }
+  const map = newMap('amap');
+  map.setView([5.3600, -4.0083], 11);
+  let me = null, popupOpen = false, fitted = false;
+  const initial = (n) => (String(n || '?').trim()[0] || '?').toUpperCase();
+  const icon = (cls, txt) => L.divIcon({ className: 'amk', html: `<div class="pn ${cls}">${esc(txt)}</div>`, iconSize: [38, 38], iconAnchor: [19, 19] });
+  map.on('popupopen', (e) => {
+    popupOpen = true;
+    const el = e.popup.getElement && e.popup.getElement();
+    const b = el && el.querySelector('[data-callu]');
+    if (b) b.onclick = () => { unlockAudio(); map.closePopup(); startCall({ user_id: Number(b.dataset.callu) }, b.dataset.name); };
+  });
+  map.on('popupclose', () => { popupOpen = false; });
+  const st = { available: ['avail', 'disponible'], busy: ['busy', 'en course'], unavailable: ['off', 'indisponible'] };
+  const popup = (u, kind, extra) => `<b>${esc(u.name)}</b><br><span class="muted">${kind}${extra || ''}</span><br><span class="muted">${esc(fmtPhone(u.phone))} · vu ${ago(u.seen_min)}</span><br><span class="muted">position ${ago(u.pos_min)}</span><div style="margin-top:8px"><button class="btn btn-sm btn-block" data-callu="${u.id}" data-name="${esc(u.name)}">📞 Appeler (Sunrise)</button></div>`;
+  async function load() {
+    if (popupOpen || state.map !== map) return;
+    try {
+      const o = await api('/api/admin/map');
+      if (state.map !== map || popupOpen) return;
+      state.layers.clearLayers();
+      const pts = [];
+      o.clients.forEach((u) => { L.marker([u.lat, u.lng], { icon: icon('cli', initial(u.name)), title: u.name }).bindPopup(popup(u, '👤 Client')).addTo(state.layers); pts.push([u.lat, u.lng]); });
+      o.drivers.forEach((u) => {
+        const [cls, label] = st[u.availability] || st.unavailable;
+        L.marker([u.lat, u.lng], { icon: icon(cls, initial(u.name)), title: u.name }).bindPopup(popup(u, `${veh(u.vehicle_type).icon} Chauffeur`, ` · ${label}`)).addTo(state.layers);
+        pts.push([u.lat, u.lng]);
+      });
+      if (me) pts.push(me);
+      if (!fitted && pts.length) { fitted = true; map.fitBounds(L.latLngBounds(pts).pad(0.25), { maxZoom: 15 }); }
+      const hid = o.without_position ? ` · ${o.without_position} sans position` : '';
+      $('#mcount').innerHTML = `<b>${o.drivers.length}</b> chauffeur${o.drivers.length > 1 ? 's' : ''} · <b>${o.clients.length}</b> client${o.clients.length > 1 ? 's' : ''}${hid}`;
+    } catch (e) { if (e.status !== 401) $('#mcount').textContent = 'Carte indisponible'; }
+  }
+  const locate = () => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition((p) => {
+      me = [p.coords.latitude, p.coords.longitude];
+      if (state.map !== map) return;
+      if (state.meMarker) map.removeLayer(state.meMarker);
+      state.meMarker = L.marker(me, { icon: L.divIcon({ className: 'amk', html: '<div class="pn me">Moi</div>', iconSize: [46, 46], iconAnchor: [23, 23] }), zIndexOffset: 2000, title: 'Moi (administrateur)' }).addTo(map);
+      map.setView(me, Math.max(map.getZoom(), 14));
+    }, () => toast("Position indisponible : autorisez la localisation pour voir « Moi »."), { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 });
+  };
+  $('#mloc').onclick = locate;
+  load();
+  locate();
+  every(15000, load);
+}
+
 function openTab(role, tab) {
   clearTimers();
   state.tab = tab;
@@ -699,7 +772,7 @@ function openTab(role, tab) {
   const views = {
     client: { request: clientRequest, inbox: userInbox, account: accountView },
     driver: { home: driverHome, inbox: userInbox, account: accountView },
-    admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, reports: adminReports, inbox: adminInbox },
+    admin: { stats: adminStats, drivers: adminDrivers, users: adminUsers, map: adminMap, reports: adminReports, inbox: adminInbox },
     validator: { drivers: adminDrivers, users: validatorUsers, account: validatorAccount },
   };
   views[role][tab]();
@@ -900,7 +973,7 @@ function renderForcedChange() {
 }
 
 async function logout() {
-  clearInterval(state.unreadTimer); clearInterval(state.callTimer);
+  clearInterval(state.unreadTimer); clearInterval(state.callTimer); clearInterval(state.posTimer);
   if (callState.id || callState.pc) await hangUp();
   await forgetPush();   // cet appareil ne doit plus recevoir les notifications de ce compte
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* on se déconnecte quand même */ }
