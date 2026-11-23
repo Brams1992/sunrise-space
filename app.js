@@ -312,7 +312,7 @@ function callUI(status, buttons, sub) {
   ui.innerHTML = `<div class="callbox"><img src="/icon-192.png" alt="" width="84" height="84" class="callicon">
     <h1>Sunrise</h1><p class="callstat" id="callstat">${esc(status)}</p><p class="tiny callsub">${esc(sub || 'Appel gratuit par internet')}</p>
     <div class="callbtns">${buttons}</div></div><audio id="callaudio" autoplay playsinline></audio>`;
-  const a = $('#callaudio'); if (a && callState.stream0) a.srcObject = callState.stream0;
+  const a = $('#callaudio'); if (a && callState.stream0) { a.srcObject = callState.stream0; a.play().catch(() => {}); }
 }
 const callBtn = (id, cls, icon, label) => `<button class="callbtn ${cls}" id="${id}"><span>${icon}</span>${esc(label)}</button>`;
 
@@ -348,11 +348,30 @@ function callCleanup(message) {
   if (message) toast(message);
 }
 
+
+/* Voix : Opus mono 24 kbit/s avec correction d'erreurs (FEC) = bien plus stable sur les réseaux mobiles faibles */
+function voiceSdp(sdp) {
+  return sdp.replace(/a=fmtp:(\d+) ([^\r\n]*)/g, (m, pt, params) => {
+    if (!/minptime/.test(params) && !/useinbandfec/.test(params)) return m;
+    const keep = params.split(';').filter((p) => !/^(useinbandfec|usedtx|stereo|sprop-stereo|maxaveragebitrate|maxplaybackrate)=/.test(p.trim()));
+    return `a=fmtp:${pt} ${keep.concat(['useinbandfec=1', 'usedtx=1', 'stereo=0', 'sprop-stereo=0', 'maxaveragebitrate=24000', 'maxplaybackrate=16000']).join(';')}`;
+  });
+}
+async function tuneVoice(pc) {
+  try {
+    for (const snd of pc.getSenders()) {
+      if (!snd.track || snd.track.kind !== 'audio') continue;
+      const p = snd.getParameters(); if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxBitrate = 32000; await snd.setParameters(p);
+    }
+  } catch { /* non supporté : sans gravité */ }
+}
+
 async function callPrepare() {
   if (!callSupported()) throw new Error("L'appel n'est pas disponible sur cet appareil. Mettez à jour votre navigateur.");
   callState.ended = false;
   let stream;
-  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }, video: false }); }
   catch { throw new Error('Autorisez le micro pour passer un appel (Réglages du téléphone > Sunrise Space / Safari > Micro).'); }
   let servers = [{ urls: 'stun:stun.l.google.com:19302' }];
   try { servers = (await api('/api/calls/ice')).iceServers || servers; } catch { /* STUN par défaut */ }
@@ -368,7 +387,12 @@ async function callPrepare() {
   };
   pc.onconnectionstatechange = () => {
     if (callState.pc !== pc) return;
-    if (pc.connectionState === 'connected') callConnected();
+    if (pc.connectionState === 'connected') { clearTimeout(callState.dropT); callConnected(); tuneVoice(pc); }
+    if (pc.connectionState === 'disconnected') {   // coupure brève : on laisse 8 s pour revenir, en relançant la recherche de chemin
+      try { pc.restartIce && pc.restartIce(); } catch { /* rien */ }
+      clearTimeout(callState.dropT);
+      callState.dropT = setTimeout(() => { if (callState.pc === pc && pc.connectionState !== 'connected') hangUp('Connexion perdue. Vérifiez votre réseau et réessayez.'); }, 8000);
+    }
     if (pc.connectionState === 'failed') hangUp('Connexion impossible. Vérifiez votre réseau et réessayez.');
   };
   return pc;
@@ -445,7 +469,7 @@ async function startCall(target, who) {
     bindCallButtons();
     const pc = await callPrepare();
     const offer = await pc.createOffer({ offerToReceiveAudio: true });
-    await pc.setLocalDescription(offer);
+    await pc.setLocalDescription({ type: offer.type, sdp: voiceSdp(offer.sdp) });
     const r = await api('/api/calls', { method: 'POST', body: { ...target, offer: JSON.stringify(pc.localDescription) } });
     if (callState.ended || callState.pc !== pc) { api(`/api/calls/${r.id}/end`, { method: 'POST' }).catch(() => {}); return; }
     callState.id = r.id;
@@ -465,7 +489,7 @@ async function answerCall(call) {
     callState.id = call.id;
     await pc.setRemoteDescription(JSON.parse(call.offer));
     const answer = await pc.createAnswer();
-    await pc.setLocalDescription(answer);
+    await pc.setLocalDescription({ type: answer.type, sdp: voiceSdp(answer.sdp) });
     await api(`/api/calls/${call.id}/accept`, { method: 'POST', body: { answer: JSON.stringify(pc.localDescription) } });
     for (const payload of callState.outIce.splice(0)) api(`/api/calls/${call.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
     callUI('Connexion…', callBtn('call-end', 'end', '📞', 'Raccrocher'));
