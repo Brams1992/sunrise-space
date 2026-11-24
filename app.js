@@ -303,14 +303,14 @@ function ratingHTML(r) {
 }
 
 /* ---------- Appels Sunrise : voix par internet, numéros jamais affichés ---------- */
-const callState = { id: null, pc: null, stream: null, poll: null, after: 0, ringTimer: null, tick: null, since: 0, muted: false, queue: [], outIce: [], busy: false, ended: false };
+const callState = { peer: null, id: null, pc: null, stream: null, poll: null, after: 0, ringTimer: null, tick: null, since: 0, muted: false, queue: [], outIce: [], busy: false, ended: false };
 const callSupported = () => !!(window.RTCPeerConnection && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
 function callUI(status, buttons, sub) {
   let ui = $('#callui');
   if (!ui) { ui = document.createElement('div'); ui.id = 'callui'; ui.className = 'callui'; document.body.appendChild(ui); }
   ui.innerHTML = `<div class="callbox"><img src="/icon-192.png" alt="" width="84" height="84" class="callicon">
-    <h1>Sunrise</h1><p class="callstat" id="callstat">${esc(status)}</p><p class="tiny callsub">${esc(sub || 'Appel gratuit par internet')}</p>
+    ${callState.peer ? `<p class="callrole">${callState.peer.role === 'driver' ? '🏍️ Chauffeur' : '👤 Client'}</p><h1>${esc(callState.peer.name)}</h1>` : '<h1>Sunrise</h1>'}<p class="callstat" id="callstat">${esc(status)}</p><p class="tiny callsub">${esc(sub || 'Appel gratuit par internet')}</p>
     <div class="callbtns">${buttons}</div></div><audio id="callaudio" autoplay playsinline></audio>`;
   const a = $('#callaudio'); if (a && callState.stream0) { a.srcObject = callState.stream0; a.play().catch(() => {}); }
 }
@@ -343,7 +343,7 @@ function callCleanup(message) {
   callState.poll = callState.tick = null;
   if (callState.pc) { try { callState.pc.close(); } catch { /* rien */ } }
   if (callState.stream) callState.stream.getTracks().forEach((t) => t.stop());
-  Object.assign(callState, { id: null, pc: null, stream: null, stream0: null, after: 0, queue: [], outIce: [], muted: false, busy: false, since: 0 });
+  Object.assign(callState, { peer: null, id: null, pc: null, stream: null, stream0: null, after: 0, queue: [], outIce: [], muted: false, busy: false, since: 0 });
   const ui = $('#callui'); if (ui) ui.remove();
   if (message) toast(message);
 }
@@ -472,7 +472,7 @@ async function startCall(target, who) {
     await pc.setLocalDescription({ type: offer.type, sdp: voiceSdp(offer.sdp) });
     const r = await api('/api/calls', { method: 'POST', body: { ...target, offer: JSON.stringify(pc.localDescription) } });
     if (callState.ended || callState.pc !== pc) { api(`/api/calls/${r.id}/end`, { method: 'POST' }).catch(() => {}); return; }
-    callState.id = r.id;
+    callState.id = r.id; callState.peer = r.peer || null;
     for (const payload of callState.outIce.splice(0)) api(`/api/calls/${r.id}/signal`, { method: 'POST', body: { kind: 'ice', payload } }).catch(() => {});
     callUI('Sonnerie…', callBtn('call-end', 'end', '📞', 'Raccrocher'), who ? `En attente de ${who}` : 'En attente de réponse');
     bindCallButtons();
@@ -503,8 +503,8 @@ async function answerCall(call) {
 }
 
 function showIncoming(call) {
-  callState.id = call.id; callState.incoming = true;
-  callUI('Appel entrant', callBtn('call-no', 'end', '✖', 'Refuser') + callBtn('call-yes', 'yes', '📞', 'Répondre'), 'Sunrise Space');
+  callState.id = call.id; callState.incoming = true; callState.peer = call.peer || null;
+  callUI('Appel entrant', callBtn('call-no', 'end', '✖', 'Refuser') + callBtn('call-yes', 'yes', '📞', 'Répondre'), 'Appel gratuit par Sunrise Space');
   ringTone(true);
   $('#call-yes').onclick = () => { callState.id = null; answerCall(call); };
   $('#call-no').onclick = async () => { const id = call.id; callCleanup(); try { await api(`/api/calls/${id}/end`, { method: 'POST' }); } catch { /* rien */ } };

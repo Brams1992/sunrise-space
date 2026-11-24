@@ -1461,6 +1461,14 @@ def call_for(db, cid, user_id):
     return c
 
 
+def peer_info(db, uid):
+    """Rôle et nom de l'interlocuteur (client/chauffeur) pour l'écran d'appel. L'administrateur reste « Sunrise »."""
+    u = db.execute("SELECT name, role FROM users WHERE id=?", (uid,)).fetchone()
+    if not u or u["role"] not in ("client", "driver"):
+        return None
+    return {"role": u["role"], "name": u["name"]}
+
+
 def valid_signal(text, limit=20000):
     return isinstance(text, str) and 0 < len(text) <= limit
 
@@ -1523,7 +1531,7 @@ def call_start():
                (cid, me_id, "offer", data["offer"], ts()))
     db.commit()
     notify_users(db, [peer], "📞 Appel Sunrise", "Appel entrant. Ouvrez Sunrise Space pour répondre.", tag="call", urgent=True)
-    return jsonify({"id": cid})
+    return jsonify({"id": cid, "peer": peer_info(db, peer)})
 
 
 @app.get("/api/calls/incoming")
@@ -1535,7 +1543,7 @@ def call_incoming():
     if not c:
         return jsonify({"call": None})
     sig = db.execute("SELECT payload FROM call_signals WHERE call_id=? AND kind='offer' ORDER BY id LIMIT 1", (c["id"],)).fetchone()
-    return jsonify({"call": {"id": c["id"], "offer": sig["payload"] if sig else None}})
+    return jsonify({"call": {"id": c["id"], "offer": sig["payload"] if sig else None, "peer": peer_info(db, c["caller_id"])}})
 
 
 @app.get("/api/calls/<int:cid>")
