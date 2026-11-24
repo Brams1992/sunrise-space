@@ -667,7 +667,7 @@ def compress(resp):
 PUBLIC_FILES = {
     "index.html", "bienvenue.html", "bienvenue.js", "app.js", "style.css", "sw.js", "manifest.webmanifest",
     "icon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "favicon-32.png", "og-image.png",
-    "confidentialite.html", "conditions.html", "404.html",
+    "confidentialite.html", "conditions.html", "404.html", "fondateur.jpg",
 }
 PAGES = {"bienvenue": "bienvenue.html", "confidentialite": "confidentialite.html", "conditions": "conditions.html"}
 
