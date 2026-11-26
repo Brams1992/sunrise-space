@@ -2013,8 +2013,37 @@ async function adminUsers() {
       </div>
       <p class="muted tiny" id="psum"></p>
     </section>
+    <section class="card stack">
+      <h3>🕘 Journal des connexions</h3>
+      <p class="muted tiny">Chaque connexion de vos utilisateurs : qui, quand, avec quel appareil.</p>
+      <div class="row"><button class="btn btn-sm" id="jopen">Voir le journal</button></div>
+    </section>
     <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div><div id="vals"></div>`;
   loadValidators();
+  $('#jopen').onclick = () => {
+    const { el, close } = modal(`<h2>Journal des connexions</h2><div id="jf"></div><div id="jl" class="list">Chargement…</div><button class="btn btn-ghost" id="jmore" hidden>Voir plus ancien</button><button class="btn btn-ghost" data-close>Fermer</button>`);
+    el.querySelector('[data-close]').onclick = close;
+    let jrole = '', last = 0;
+    const jl = el.querySelector('#jl'), more = el.querySelector('#jmore');
+    async function jload(reset) {
+      if (reset) { last = 0; jl.innerHTML = 'Chargement…'; }
+      el.querySelector('#jf').innerHTML = filterTabs([['', 'Tous'], ['client', 'Clients'], ['driver', 'Chauffeurs']], jrole, 'j');
+      el.querySelectorAll('#jf [data-j]').forEach((b) => (b.onclick = () => { jrole = b.dataset.j; jload(true); }));
+      try {
+        const { logins } = await api(`/api/admin/logins?role=${jrole}&before=${last}`);
+        const html = logins.map((l) => `<article class="card flat"><p><b>${esc(l.name)}</b> <span class="chip">${l.role === 'driver' ? 'Chauffeur' : 'Client'}</span></p>
+          <p class="muted">${esc(fmtPhone(l.phone))} · ${esc(fmtWhen(l.at))}</p>
+          <p class="muted tiny">${l.kind === 'reprise' ? '📱 App ouverte (session active)' : '🔑 Connexion'} · ${esc(deviceLabel(l.device))}${l.ip ? ' · IP ' + esc(l.ip) : ''}</p></article>`).join('');
+        if (reset) jl.innerHTML = '';
+        if (!logins.length && reset) jl.innerHTML = '<p class="muted">Aucune connexion enregistrée pour le moment.</p>';
+        else jl.insertAdjacentHTML('beforeend', html);
+        if (logins.length) last = logins[logins.length - 1].id;
+        more.hidden = logins.length < 100;
+      } catch (err) { jl.innerHTML = `<p class="muted">${esc(err.message)}</p>`; }
+    }
+    more.onclick = () => jload(false);
+    jload(true);
+  };
   const today = new Date().toISOString().slice(0, 10);
   $('#pf').value = $('#pt').value = today;
   $('#pgo').onclick = () => {
@@ -2093,9 +2122,9 @@ async function adminUsers() {
       const { el, close } = modal(`<h2>Connexions de ${esc(h.dataset.name)}</h2><div id="hl" class="list">Chargement…</div><button class="btn btn-ghost" data-close>Fermer</button>`);
       el.querySelector('[data-close]').onclick = close;
       try {
-        const { connexions } = await api(`/api/admin/users/${h.dataset.hist}/history`);
-        el.querySelector('#hl').innerHTML = connexions.length
-          ? connexions.map((c) => `<p class="card flat">${esc(fmtWhen(c))}</p>`).join('')
+        const { details } = await api(`/api/admin/users/${h.dataset.hist}/history`);
+        el.querySelector('#hl').innerHTML = details.length
+          ? details.map((c) => `<p class="card flat">${esc(fmtWhen(c.at))}<br><span class="muted tiny">${c.kind === 'reprise' ? '📱 App ouverte · ' : '🔑 Connexion · '}${esc(deviceLabel(c.device))}${c.ip ? ' · IP ' + esc(c.ip) : ''}</span></p>`).join('')
           : '<p class="muted">Aucune connexion enregistrée pour le moment.</p>';
       } catch (err) { el.querySelector('#hl').innerHTML = `<p class="muted">${esc(err.message)}</p>`; }
       return;
@@ -2158,6 +2187,13 @@ const fmtWhen = (s) => {
   if (!s) return '';
   const d = new Date(String(s).replace(' ', 'T') + 'Z');
   return d.toLocaleString('fr-FR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+};
+const deviceLabel = (ua) => {
+  ua = String(ua || '');
+  if (!ua) return 'Appareil inconnu';
+  const os = /iPhone|iPad/.test(ua) ? 'iPhone/iPad' : /Android/.test(ua) ? 'Android' : /Windows/.test(ua) ? 'Windows' : /Mac OS/.test(ua) ? 'Mac' : /Linux/.test(ua) ? 'Linux' : 'Autre';
+  const br = /Edg\//.test(ua) ? 'Edge' : /OPR\/|Opera/.test(ua) ? 'Opera' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : '';
+  return br ? `${os} · ${br}` : os;
 };
 const nl = (t) => esc(t).replace(/\n/g, '<br>');
 const bubbles = (msgs, mine) => msgs.length

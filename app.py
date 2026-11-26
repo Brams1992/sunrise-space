@@ -353,6 +353,9 @@ def init_db(create_admin=True):
         ensure_column(db, "users", "must_change_password", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "users", "staff_scope", "TEXT")
         ensure_column(db, "users", "last_seen_at", "TEXT")
+        ensure_column(db, "login_history", "ip", "TEXT")
+        ensure_column(db, "login_history", "device", "TEXT")
+        ensure_column(db, "login_history", "kind", "TEXT NOT NULL DEFAULT 'login'")
         ensure_column(db, "ride_requests", "vehicle_type", "TEXT NOT NULL DEFAULT 'any'")
         ensure_column(db, "ride_requests", "rating", "INTEGER")
         ensure_column(db, "ride_requests", "rating_comment", "TEXT")
@@ -538,6 +541,12 @@ def auth_required(*roles):
 
 
 _login_fails = {}
+
+
+def client_ip():
+    """Adresse de la personne (derrière un hébergeur, elle est dans X-Forwarded-For)."""
+    fwd = request.headers.get("X-Forwarded-For", "")
+    return (fwd.split(",")[0].strip() if fwd else "") or request.remote_addr or ""
 
 
 def login_locked(key):
@@ -835,7 +844,8 @@ def login():
         return err("Ce compte est suspendu. Contactez le support.", 403)
     _login_fails.pop(key, None)
     token = issue_token(db, user["id"])
-    db.execute("INSERT INTO login_history(user_id, at) VALUES(?,?)", (user["id"], ts()))
+    db.execute("INSERT INTO login_history(user_id, at, ip, device) VALUES(?,?,?,?)",
+               (user["id"], ts(), clean(client_ip(), 60), clean(request.headers.get("User-Agent"), 200)))
     db.execute("DELETE FROM login_history WHERE user_id=? AND id NOT IN "
                "(SELECT id FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200)", (user["id"], user["id"]))
     db.commit()
@@ -857,7 +867,18 @@ def logout():
 @app.get("/api/me")
 @auth_required()
 def me():
-    return jsonify({"user": user_public(g.user), "driver": driver_profile(get_db(), g.user["id"])})
+    db = get_db()
+    if g.user["role"] != "admin":
+        # Les sessions durent des jours : l'ouverture de l'application avec une session déjà active
+        # est aussi notée (au plus une fois toutes les 30 min par personne).
+        last = db.execute("SELECT MAX(at) AS at FROM login_history WHERE user_id=?", (g.user["id"],)).fetchone()
+        if not last or not last["at"] or last["at"] < ts(now() - timedelta(minutes=30)):
+            db.execute("INSERT INTO login_history(user_id, at, ip, device, kind) VALUES(?,?,?,?,'reprise')",
+                       (g.user["id"], ts(), clean(client_ip(), 60), clean(request.headers.get("User-Agent"), 200)))
+            db.execute("DELETE FROM login_history WHERE user_id=? AND id NOT IN "
+                       "(SELECT id FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200)", (g.user["id"], g.user["id"]))
+            db.commit()
+    return jsonify({"user": user_public(g.user), "driver": driver_profile(db, g.user["id"])})
 
 
 # --- Mot de passe : changement, oubli ------------------------------------------
@@ -2207,8 +2228,31 @@ def admin_user_history(uid):
     u = db.execute("SELECT id FROM users WHERE id=? AND role!='admin'", (uid,)).fetchone()
     if not u:
         return err("Utilisateur introuvable.", 404)
-    rows = db.execute("SELECT at FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,)).fetchall()
-    return jsonify({"connexions": [r["at"] for r in rows]})
+    rows = db.execute("SELECT at, ip, device, kind FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,)).fetchall()
+    return jsonify({"connexions": [r["at"] for r in rows], "details": [dict(r) for r in rows]})
+
+
+@app.get("/api/admin/logins")
+@auth_required("admin")
+def admin_logins():
+    """Journal de TOUTES les connexions, de la plus récente à la plus ancienne."""
+    role = request.args.get("role")
+    sql = """SELECT h.id, h.at, h.ip, h.device, h.kind, u.id AS user_id, u.name, u.phone, u.role
+             FROM login_history h JOIN users u ON u.id = h.user_id WHERE u.role != 'admin'"""
+    params = []
+    if role in ("client", "driver"):
+        sql += " AND u.role=?"
+        params.append(role)
+    try:
+        before = int(request.args.get("before") or 0)
+    except ValueError:
+        before = 0
+    if before:
+        sql += " AND h.id < ?"
+        params.append(before)
+    sql += " ORDER BY h.id DESC LIMIT 100"
+    rows = get_db().execute(sql, params).fetchall()
+    return jsonify({"logins": [dict(r) for r in rows]})
 
 
 @app.post("/api/admin/users/<int:uid>/block")
