@@ -122,6 +122,11 @@ CREATE TABLE IF NOT EXISTS user_positions(
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   lat REAL NOT NULL, lng REAL NOT NULL, at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS login_history(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS password_resets(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -830,6 +835,10 @@ def login():
         return err("Ce compte est suspendu. Contactez le support.", 403)
     _login_fails.pop(key, None)
     token = issue_token(db, user["id"])
+    db.execute("INSERT INTO login_history(user_id, at) VALUES(?,?)", (user["id"], ts()))
+    db.execute("DELETE FROM login_history WHERE user_id=? AND id NOT IN "
+               "(SELECT id FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200)", (user["id"], user["id"]))
+    db.commit()
     return jsonify({"token": token, "user": user_public(user), "driver": driver_profile(db, user["id"])})
 
 
@@ -2161,6 +2170,17 @@ def admin_users():
         params += [f"%{q}%", f"%{digits or q}%"]
     sql += " ORDER BY id DESC LIMIT 100"
     return jsonify({"users": [dict(r) for r in get_db().execute(sql, params).fetchall()]})
+
+
+@app.get("/api/admin/users/<int:uid>/history")
+@auth_required("admin")
+def admin_user_history(uid):
+    db = get_db()
+    u = db.execute("SELECT id FROM users WHERE id=? AND role!='admin'", (uid,)).fetchone()
+    if not u:
+        return err("Utilisateur introuvable.", 404)
+    rows = db.execute("SELECT at FROM login_history WHERE user_id=? ORDER BY id DESC LIMIT 200", (uid,)).fetchall()
+    return jsonify({"connexions": [r["at"] for r in rows]})
 
 
 @app.post("/api/admin/users/<int:uid>/block")

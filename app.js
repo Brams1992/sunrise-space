@@ -2056,7 +2056,7 @@ async function adminUsers() {
       $('#ul').innerHTML = users.length ? users.map((u) => `<article class="card item">
         <h3>${esc(u.name)} <span class="chip">${u.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${u.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</h3>
         <p class="muted">${esc(fmtPhone(u.phone))} · inscrit le ${esc(u.created_at.slice(0, 10))}</p>
-        <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button><button class="btn btn-sm btn-danger" data-del="${u.id}" data-name="${esc(u.name)}">🗑️ Supprimer</button></div></article>`).join('')
+        <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm btn-ghost" data-hist="${u.id}" data-name="${esc(u.name)}">🕘 Historique</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button><button class="btn btn-sm btn-danger" data-del="${u.id}" data-name="${esc(u.name)}">🗑️ Supprimer</button></div></article>`).join('')
         : empty('🔍', 'Aucun résultat', '');
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
   }
@@ -2064,6 +2064,18 @@ async function adminUsers() {
   $('#ul').addEventListener('click', async (e) => {
     const w = e.target.closest('[data-write]');
     if (w) { state.openThread = { id: +w.dataset.write, name: w.dataset.name }; return openTab('admin', 'inbox'); }
+    const h = e.target.closest('[data-hist]');
+    if (h) {
+      const { el, close } = modal(`<h2>Connexions de ${esc(h.dataset.name)}</h2><div id="hl" class="list">Chargement…</div><button class="btn btn-ghost" data-close>Fermer</button>`);
+      el.querySelector('[data-close]').onclick = close;
+      try {
+        const { connexions } = await api(`/api/admin/users/${h.dataset.hist}/history`);
+        el.querySelector('#hl').innerHTML = connexions.length
+          ? connexions.map((c) => `<p class="card flat">${esc(fmtWhen(c))}</p>`).join('')
+          : '<p class="muted">Aucune connexion enregistrée pour le moment.</p>';
+      } catch (err) { el.querySelector('#hl').innerHTML = `<p class="muted">${esc(err.message)}</p>`; }
+      return;
+    }
     const d = e.target.closest('[data-del]');
     if (d) {
       const typed = prompt(`SUPPRESSION DÉFINITIVE de « ${d.dataset.name} ».\nSon compte, ses messages et ses demandes seront effacés. Impossible d'annuler.\n\nPour confirmer, tapez SUPPRIMER :`);

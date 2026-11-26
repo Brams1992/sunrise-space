@@ -792,6 +792,20 @@ class TestSunrise(Base):
         self.assertEqual((h["stats"]["completed"], h["stats"]["today"]), (1, 1))
         self.assertNotIn("0707070707", str(h))
 
+    def test_connection_history(self):
+        admin = self.login("0700000000", "admin-secret")
+        _, uid = self.register("client", "Awa Koné", "0707070777")
+        h = self.call("get", f"/api/admin/users/{uid}/history", admin).get_json()
+        self.assertEqual(h["connexions"], [])   # l'inscription seule n'est pas une « connexion » comptée
+        self.assertEqual(self.call("post", "/api/auth/login", json={"phone": "0707070777", "password": "secret1"}).status_code, 200)
+        self.call("post", "/api/auth/login", json={"phone": "0707070777", "password": "secret1"})
+        h = self.call("get", f"/api/admin/users/{uid}/history", admin).get_json()
+        self.assertEqual(len(h["connexions"]), 2)
+        self.assertGreaterEqual(h["connexions"][0], h["connexions"][1])   # plus récent en premier
+        client_tok = self.login("0707070777", "secret1")
+        self.assertEqual(self.call("get", f"/api/admin/users/{uid}/history", client_tok).status_code, 403)
+        self.assertEqual(self.call("get", "/api/admin/users/999999/history", admin).status_code, 404)
+
     def test_site_hygiene(self):
         import re as _re
         # pages légales, robots, sitemap, favicon, image d'aperçu
