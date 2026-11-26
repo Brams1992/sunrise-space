@@ -2016,10 +2016,35 @@ async function adminUsers() {
     <section class="card stack">
       <h3>🕘 Journal des connexions</h3>
       <p class="muted tiny">Chaque connexion de vos utilisateurs : qui, quand, avec quel appareil.</p>
-      <div class="row"><button class="btn btn-sm" id="jopen">Voir le journal</button></div>
+      <div class="row"><button class="btn btn-sm" id="jopen">Voir le journal</button><button class="btn btn-sm btn-ghost" id="fopen">📊 Fréquentation</button></div>
     </section>
     <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div><div id="vals"></div>`;
   loadValidators();
+  $('#fopen').onclick = () => {
+    const { el, close } = modal(`<h2>📊 Fréquentation</h2><div id="ff"></div><div id="fb">Chargement…</div><button class="btn btn-ghost" data-close>Fermer</button>`);
+    el.querySelector('[data-close]').onclick = close;
+    let days = 7;
+    async function fload() {
+      el.querySelector('#ff').innerHTML = filterTabs([['7', '7 jours'], ['30', '30 jours'], ['90', '90 jours']], String(days), 'f');
+      el.querySelectorAll('#ff [data-f]').forEach((b) => (b.onclick = () => { days = +b.dataset.f; fload(); }));
+      try {
+        const r = await api(`/api/admin/frequentation?days=${days}`);
+        const reg = r.registered.clients + r.registered.drivers, act = r.active.clients + r.active.drivers;
+        const rate = reg ? Math.round((act / reg) * 100) : 0;
+        const max = Math.max(1, ...r.series.map((d) => d.clients + d.drivers));
+        el.querySelector('#fb').innerHTML = `
+          <div class="card flat"><p><b>${rate} %</b> des inscrits actifs sur ${days} jours</p>
+            <p class="muted">${act} personne${act > 1 ? 's' : ''} sur ${reg} inscrit${reg > 1 ? 's' : ''} (clients : ${r.active.clients}/${r.registered.clients} · chauffeurs : ${r.active.drivers}/${r.registered.drivers})</p>
+            <p class="muted">Aujourd'hui : ${r.today} personne${r.today > 1 ? 's' : ''} · ${r.opens} connexion${r.opens > 1 ? 's' : ''} / ouverture${r.opens > 1 ? 's' : ''} sur la période</p></div>
+          <p class="muted tiny">Personnes différentes par jour (clients + chauffeurs)</p>
+          <div style="max-height:46vh;overflow:auto">${r.series.slice().reverse().map((d) => {
+            const n = d.clients + d.drivers;
+            return `<div style="display:flex;align-items:center;gap:8px;margin:4px 0"><span class="muted tiny" style="width:46px">${esc(d.day.slice(8))}/${esc(d.day.slice(5, 7))}</span><div style="flex:1;background:rgba(128,128,128,.15);border-radius:6px;height:16px"><div style="width:${Math.round((n / max) * 100)}%;height:100%;border-radius:6px;background:#f59e0b"></div></div><span class="tiny" style="width:34px;text-align:right">${n}</span></div>`;
+          }).join('')}</div>`;
+      } catch (err) { el.querySelector('#fb').innerHTML = `<p class="muted">${esc(err.message)}</p>`; }
+    }
+    fload();
+  };
   $('#jopen').onclick = () => {
     const { el, close } = modal(`<h2>Journal des connexions</h2><div id="jf"></div><div id="jl" class="list">Chargement…</div><button class="btn btn-ghost" id="jmore" hidden>Voir plus ancien</button><button class="btn btn-ghost" data-close>Fermer</button>`);
     el.querySelector('[data-close]').onclick = close;

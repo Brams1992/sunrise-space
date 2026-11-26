@@ -47,7 +47,7 @@ FILE_MAX_BYTES = 12 * 1024 * 1024   # taille maximale d'un fichier envoyé par l
 FILE_KEEP_DAYS = 7                  # un fichier non téléchargé est effacé du serveur après 7 jours
 LOCATION_TTL_MIN = 10        # un chauffeur sans position récente n'apparaît plus
 REQUEST_TTL_MIN = 30         # une demande non prise expire après 30 min
-TOKEN_TTL_DAYS = 30
+TOKEN_TTL_DAYS = 7
 VEHICLE_TYPES = {"moto": "Moto-taxi", "voiture": "Taxi (voiture)", "tricycle": "Tricycle"}
 NEARBY_RADIUS_KM = 15.0      # rayon par défaut de recherche
 MAX_LOGIN_FAILS = 5
@@ -2219,6 +2219,50 @@ def admin_users_connected():
     sql += " GROUP BY u.id ORDER BY last_at DESC LIMIT 500"
     rows = db.execute(sql, params).fetchall()
     return jsonify({"users": [dict(r) for r in rows]})
+
+
+@app.get("/api/admin/frequentation")
+@auth_required("admin")
+def admin_frequentation():
+    """Fréquentation d'après le journal des connexions : personnes actives par jour, taux sur les inscrits."""
+    try:
+        days = max(1, min(int(request.args.get("days") or 7), 90))
+    except ValueError:
+        days = 7
+    db = get_db()
+    start_day = (now() - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    start = start_day + " 00:00:00"
+    rows = db.execute("""SELECT substr(h.at,1,10) AS day, u.role AS role,
+                                COUNT(DISTINCT h.user_id) AS people, COUNT(*) AS opens
+                         FROM login_history h JOIN users u ON u.id = h.user_id
+                         WHERE h.at >= ? AND u.role != 'admin'
+                         GROUP BY substr(h.at,1,10), u.role""", (start,)).fetchall()
+    per = {}
+    for r in rows:
+        d = per.setdefault(r["day"], {"client": 0, "driver": 0, "opens": 0})
+        d[r["role"]] = r["people"]
+        d["opens"] += r["opens"]
+    series = []
+    for i in range(days):
+        day = (now() - timedelta(days=days - 1 - i)).strftime("%Y-%m-%d")
+        d = per.get(day, {"client": 0, "driver": 0, "opens": 0})
+        series.append({"day": day, "clients": d["client"], "drivers": d["driver"], "opens": d["opens"]})
+    active = db.execute("""SELECT u.role AS role, COUNT(DISTINCT h.user_id) AS n FROM login_history h
+                           JOIN users u ON u.id = h.user_id WHERE h.at >= ? AND u.role != 'admin' GROUP BY u.role""",
+                        (start,)).fetchall()
+    active = {r["role"]: r["n"] for r in active}
+    reg = db.execute("SELECT role, COUNT(*) AS n FROM users WHERE role != 'admin' AND is_blocked=0 GROUP BY role").fetchall()
+    reg = {r["role"]: r["n"] for r in reg}
+    today = now().strftime("%Y-%m-%d")
+    t = db.execute("SELECT COUNT(DISTINCT user_id) AS n FROM login_history h JOIN users u ON u.id=h.user_id "
+                   "WHERE h.at >= ? AND u.role != 'admin'", (today + " 00:00:00",)).fetchone()
+    return jsonify({
+        "days": days, "series": series,
+        "active": {"clients": active.get("client", 0), "drivers": active.get("driver", 0)},
+        "registered": {"clients": reg.get("client", 0), "drivers": reg.get("driver", 0)},
+        "today": t["n"] if t else 0,
+        "opens": sum(x["opens"] for x in series),
+    })
 
 
 @app.get("/api/admin/users/<int:uid>/history")
