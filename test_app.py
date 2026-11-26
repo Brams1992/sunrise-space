@@ -806,6 +806,23 @@ class TestSunrise(Base):
         self.assertEqual(self.call("get", f"/api/admin/users/{uid}/history", client_tok).status_code, 403)
         self.assertEqual(self.call("get", "/api/admin/users/999999/history", admin).status_code, 404)
 
+    def test_connected_users_by_period(self):
+        admin = self.login("0700000000", "admin-secret")
+        _, uid = self.register("client", "Awa Koné", "0707070778")
+        self.register("driver", "Moussa Moto", "0501010199", driver={"plate": "1234 AB 01", "permis": "CI-554433", "commune": "Cocody", "vehicle_type": "moto"})
+        self.call("post", "/api/auth/login", json={"phone": "0707070778", "password": "secret1"})
+        today = sunrise.now().strftime("%Y-%m-%d")
+        r = self.call("get", f"/api/admin/users/connected?from={today}&to={today}", admin).get_json()
+        names = [u["name"] for u in r["users"]]
+        self.assertIn("Awa Koné", names)
+        self.assertNotIn("Moussa Moto", names)   # jamais connecté par mot de passe (seulement inscrit)
+        yesterday = (sunrise.now() - sunrise.timedelta(days=1)).strftime("%Y-%m-%d")
+        r2 = self.call("get", f"/api/admin/users/connected?from={yesterday}&to={yesterday}", admin).get_json()
+        self.assertEqual(r2["users"], [])
+        self.assertEqual(self.call("get", "/api/admin/users/connected?from=2026-13-01&to=2026-01-01", admin).status_code, 400)
+        r3 = self.call("get", f"/api/admin/users/connected?from={today}&to={today}&role=driver", admin).get_json()
+        self.assertEqual(r3["users"], [])
+
     def test_site_hygiene(self):
         import re as _re
         # pages légales, robots, sitemap, favicon, image d'aperçu

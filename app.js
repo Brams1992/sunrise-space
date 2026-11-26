@@ -2002,11 +2002,29 @@ function showTempPassword(r) {
 }
 
 async function adminUsers() {
-  let role = '', q = '';
+  let role = '', q = '', period = null;   // period = { from, to } quand le filtre « connectés sur une période » est actif
   $('#main').innerHTML = `<div id="pwr"></div><h2>Utilisateurs</h2>
     <div class="row"><input id="uq" type="search" placeholder="Rechercher un nom ou un numéro…" style="flex:1" aria-label="Rechercher"></div>
+    <section class="card stack">
+      <h3>📅 Connectés sur une période</h3>
+      <div class="row">
+        <input id="pf" type="date" aria-label="Du"><input id="pt" type="date" aria-label="Au">
+        <button class="btn btn-sm" id="pgo">Voir</button><button class="btn btn-sm btn-ghost" id="pclear" hidden>Annuler</button>
+      </div>
+      <p class="muted tiny" id="psum"></p>
+    </section>
     <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div><div id="vals"></div>`;
   loadValidators();
+  const today = new Date().toISOString().slice(0, 10);
+  $('#pf').value = $('#pt').value = today;
+  $('#pgo').onclick = () => {
+    const from = $('#pf').value, to = $('#pt').value;
+    if (!from || !to) return toast('Choisissez les deux dates', 'bad');
+    period = { from, to };
+    $('#pclear').hidden = false;
+    load();
+  };
+  $('#pclear').onclick = () => { period = null; $('#pclear').hidden = true; $('#psum').textContent = ''; load(); };
   async function loadBin() {
     try {
       const { copies } = await api('/api/admin/safety-copies');
@@ -2052,10 +2070,16 @@ async function adminUsers() {
     $('#ft').innerHTML = filterTabs([['', 'Tous'], ['client', 'Clients'], ['driver', 'Chauffeurs']], role, 'r');
     $$('#ft [data-r]').forEach((b) => (b.onclick = () => { role = b.dataset.r; load(); }));
     try {
-      const { users } = await api(`/api/admin/users?role=${role}&q=${encodeURIComponent(q)}`);
+      const { users } = period
+        ? await api(`/api/admin/users/connected?from=${period.from}&to=${period.to}&role=${role}`)
+        : await api(`/api/admin/users?role=${role}&q=${encodeURIComponent(q)}`);
+      if (period) {
+        const n = users.length;
+        $('#psum').textContent = n ? `${n} personne${n > 1 ? 's' : ''} connectée${n > 1 ? 's' : ''} entre le ${period.from.split('-').reverse().join('/')} et le ${period.to.split('-').reverse().join('/')}.` : `Personne connectée entre le ${period.from.split('-').reverse().join('/')} et le ${period.to.split('-').reverse().join('/')}.`;
+      }
       $('#ul').innerHTML = users.length ? users.map((u) => `<article class="card item">
         <h3>${esc(u.name)} <span class="chip">${u.role === 'driver' ? 'Chauffeur' : 'Client'}</span>${u.is_blocked ? '<span class="chip bad">Suspendu</span>' : ''}</h3>
-        <p class="muted">${esc(fmtPhone(u.phone))} · inscrit le ${esc(u.created_at.slice(0, 10))}</p>
+        <p class="muted">${esc(fmtPhone(u.phone))} · ${period ? `${u.n} connexion${u.n > 1 ? 's' : ''}, dernière ${fmtWhen(u.last_at)}` : `inscrit le ${esc(u.created_at.slice(0, 10))}`}</p>
         <div class="actions"><button class="btn btn-sm btn-ghost" data-write="${u.id}" data-name="${esc(u.name)}">✉️ Écrire</button><button class="btn btn-sm btn-ghost" data-hist="${u.id}" data-name="${esc(u.name)}">🕘 Historique</button><button class="btn btn-sm ${u.is_blocked ? 'btn-ok' : 'btn-danger'}" data-block="${u.is_blocked ? 0 : 1}" data-id="${u.id}">${u.is_blocked ? 'Réactiver' : 'Suspendre'}</button><button class="btn btn-sm btn-danger" data-del="${u.id}" data-name="${esc(u.name)}">🗑️ Supprimer</button></div></article>`).join('')
         : empty('🔍', 'Aucun résultat', '');
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }

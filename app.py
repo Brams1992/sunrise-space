@@ -2172,6 +2172,34 @@ def admin_users():
     return jsonify({"users": [dict(r) for r in get_db().execute(sql, params).fetchall()]})
 
 
+@app.get("/api/admin/users/connected")
+@auth_required("admin")
+def admin_users_connected():
+    """Chauffeurs et clients ayant ouvert une session (connexion par mot de passe) entre deux dates."""
+    d_from = clean(request.args.get("from"), 10)
+    d_to = clean(request.args.get("to"), 10)
+    try:
+        datetime.strptime(d_from or "", "%Y-%m-%d")
+        datetime.strptime(d_to or "", "%Y-%m-%d")
+    except ValueError:
+        return err("Indiquez une date de début et de fin valides (AAAA-MM-JJ).")
+    start, end = d_from + " 00:00:00", d_to + " 23:59:59"
+    if start > end:
+        start, end = end[:10] + " 00:00:00", start[:10] + " 23:59:59"
+    role = request.args.get("role")
+    db = get_db()
+    sql = """SELECT u.id, u.role, u.name, u.phone, u.is_blocked, COUNT(h.id) AS n, MAX(h.at) AS last_at
+             FROM login_history h JOIN users u ON u.id = h.user_id
+             WHERE h.at BETWEEN ? AND ? AND u.role != 'admin'"""
+    params = [start, end]
+    if role in ("client", "driver"):
+        sql += " AND u.role=?"
+        params.append(role)
+    sql += " GROUP BY u.id ORDER BY last_at DESC LIMIT 500"
+    rows = db.execute(sql, params).fetchall()
+    return jsonify({"users": [dict(r) for r in rows]})
+
+
 @app.get("/api/admin/users/<int:uid>/history")
 @auth_required("admin")
 def admin_user_history(uid):
