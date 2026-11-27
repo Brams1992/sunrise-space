@@ -1,6 +1,6 @@
 // Service worker Sunrise Space : l'application s'ouvre même avec un réseau faible.
 // Les appels /api ne sont JAMAIS mis en cache (positions et statuts doivent être frais).
-const CACHE = "sunrise-space-v30";
+const CACHE = "sunrise-space-v31";
 const SHELL = ["/", "/style.css", "/app.js", "/manifest.webmanifest", "/icon.svg",
                "/icon-192.png", "/icon-512.png"];
 
@@ -43,7 +43,7 @@ self.addEventListener("push", (e) => {
   const longBuzz = []; for (let i = 0; i < 9; i++) longBuzz.push(800, 300);
   e.waitUntil(Promise.all([
     self.registration.showNotification(d.title || "Sunrise Space", {
-      body: d.body || "", tag: d.tag || "sunrise", renotify: true, requireInteraction: urgent,
+      body: d.body || "", tag: d.tag || "sunrise", renotify: true, requireInteraction: urgent, silent: false,
       vibrate: urgent ? longBuzz : [200], icon: "/icon-192.png", badge: "/icon-192.png", data: { url: d.url || "/" },
     }),
     // application ouverte : on la prévient pour qu'elle actualise et fasse sonner sa sirène

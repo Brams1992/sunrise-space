@@ -35,7 +35,7 @@ else:
     import sqlite3
 
 # --- Réglages -----------------------------------------------------------------
-PUSH_DRIVER_MAX_AGE_H = 14     # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 14 h
+PUSH_DRIVER_MAX_AGE_H = 2      # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 2 h
 GHOST_AFTER_H = 12            # « Disponible » sans position depuis 12 h : repassé automatiquement en indisponible
 MAX_TRIP_KM = 300               # destination à plus de 300 km du départ : refusée
 ONLINE_WINDOW_MIN = 3          # « en ligne » = application ouverte à l'écran dans les 3 dernières minutes

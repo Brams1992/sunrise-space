@@ -488,6 +488,33 @@ class TestSunrise(Base):
         finally:
             sunrise._deliver = original
 
+    def test_push_stops_after_driver_away_too_long(self):
+        """Un chauffeur « Disponible » reçoit les nouvelles demandes même appli fermée, mais seulement
+        si sa dernière position connue a moins de PUSH_DRIVER_MAX_AGE_H (2 h) : au-delà, on ne le sonne plus."""
+        sent = []
+        original = sunrise._deliver
+        sunrise._deliver = lambda subs, payload: sent.append([x["endpoint"] for x in subs])
+        try:
+            admin = self.login("0700000000", "admin-secret")
+            client, cid = self.register("client", "Awa Koné", "0707070707")
+            recent, rid_ = self.register("driver", "Récent", "0501010101")
+            stale, sid_ = self.register("driver", "Parti depuis longtemps", "0502020202")
+            for tok, uid in ((recent, rid_), (stale, sid_)):
+                self.call("post", f"/api/admin/drivers/{uid}/approval", admin, json={"decision": "approved"})
+                self.call("post", "/api/driver/location", tok, json={"lat": NEAR[0], "lng": NEAR[1]})
+                self.call("put", "/api/driver/status", tok, json={"availability": "available"})
+                self.call("post", "/api/push/subscribe", tok, json=self._sub("fcm.googleapis.com", str(uid)))
+            with sunrise.app.app_context():
+                db = sunrise.get_db()
+                # ce chauffeur a quitté l'application depuis 3 h : hors de la fenêtre de 2 h, plus de notification
+                db.execute("UPDATE drivers SET location_at=? WHERE user_id=?",
+                           (sunrise.ts(sunrise.now() - sunrise.timedelta(hours=3)), sid_))
+                db.commit()
+            self.call("post", "/api/requests", client, json={"lat": ABIDJAN[0], "lng": ABIDJAN[1], "pickup_text": "Marché"})
+            self.assertEqual(len(sent), 1)   # un seul envoi, et uniquement au chauffeur « récent »
+        finally:
+            sunrise._deliver = original
+
     def test_rating_and_ghost_drivers(self):
         admin = self.login("0700000000", "admin-secret")
         client, cid = self.register("client", "Awa Koné", "0707070707")
