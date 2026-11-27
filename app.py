@@ -1389,7 +1389,7 @@ def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup, trip_km=None):
     return len(near)
 
 
-PUSH_REMINDER_DELAYS = (10,) * 8     # tant que la demande est ouverte : le téléphone re-sonne 8 fois, toutes les 10 s (environ 1 min 30)
+PUSH_REMINDER_DELAYS = (1,) * 40     # tant que la demande est ouverte : le téléphone re-sonne toutes les secondes pendant 40 s
 
 
 def _remind_drivers(rid, driver_ids):
