@@ -38,6 +38,7 @@ else:
 PUSH_DRIVER_MAX_AGE_H = 2      # on prévient un chauffeur « disponible » même app fermée, si sa dernière position a moins de 2 h
 GHOST_AFTER_H = 12            # « Disponible » sans position depuis 12 h : repassé automatiquement en indisponible
 MAX_TRIP_KM = 300               # destination à plus de 300 km du départ : refusée
+DRIVER_AWAY_MIN = 120          # un chauffeur « Disponible » qui quitte l'application reste « en ligne » 2 h dans l'espace admin
 ONLINE_WINDOW_MIN = 3          # « en ligne » = application ouverte à l'écran dans les 3 dernières minutes
 NUDGE_STALE_MIN = 2           # chauffeur en course sans position depuis 2 min : on lui envoie un rappel
 NUDGE_EVERY_MIN = 4           # au plus un rappel toutes les 4 min
@@ -1248,11 +1249,15 @@ def vapid_header(priv, pub_b64, endpoint):
 def _send_one(priv, pub_b64, sub, payload):
     """Envoie une notification. Renvoie « ok », « gone » (abonnement mort : à supprimer) ou « error »."""
     try:
+        try:   # demande de course : si le téléphone est éteint ou sans réseau, elle n'est plus livrée après 2 min (course périmée)
+            ttl = 120 if json.loads(payload).get("urgent") else 1800
+        except Exception:
+            ttl = 1800
         data = webpush_encrypt(payload, sub["p256dh"], sub["auth"])
         req = urllib.request.Request(sub["endpoint"], data=data, method="POST", headers={
             "Authorization": vapid_header(priv, pub_b64, sub["endpoint"]),
             "Content-Encoding": "aes128gcm", "Content-Type": "application/octet-stream",
-            "TTL": "1800", "Urgency": "high"})
+            "TTL": str(ttl), "Urgency": "high"})
         urllib.request.urlopen(req, timeout=8).close()
         return "ok"
     except urllib.error.HTTPError as e:
@@ -1384,7 +1389,7 @@ def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup, trip_km=None):
     return len(near)
 
 
-PUSH_REMINDER_DELAYS = (12, 12, 12)   # tant que la demande est ouverte : on re-sonne 3 fois, toutes les 12 s
+PUSH_REMINDER_DELAYS = (10,) * 8     # tant que la demande est ouverte : le téléphone re-sonne 8 fois, toutes les 10 s (environ 1 min 30)
 
 
 def _remind_drivers(rid, driver_ids):
@@ -1993,19 +1998,23 @@ def admin_map():
     """Carte : chauffeurs et clients connectés (application ouverte) avec leur dernière position connue."""
     db = get_db()
     since = ts(now() - timedelta(minutes=ONLINE_WINDOW_MIN))
+    away_since = ts(now() - timedelta(minutes=DRIVER_AWAY_MIN))
     pos_fresh = ts(now() - timedelta(minutes=LOCATION_TTL_MIN * 3))
     drivers, clients, hidden = [], [], 0
     rows = db.execute(
         """SELECT u.id, u.name, u.phone, u.last_seen_at, d.vehicle_type, d.availability, d.approval, d.lat, d.lng, d.location_at
            FROM users u JOIN drivers d ON d.user_id=u.id
-           WHERE u.role='driver' AND u.is_blocked=0 AND u.last_seen_at>=? ORDER BY u.last_seen_at DESC LIMIT 400""", (since,)).fetchall()
+           WHERE u.role='driver' AND u.is_blocked=0
+             AND (u.last_seen_at>=? OR (d.availability IN ('available','busy') AND u.last_seen_at>=?))
+           ORDER BY u.last_seen_at DESC LIMIT 400""", (since, away_since)).fetchall()
     for r in rows:
-        if r["lat"] is None or not r["location_at"] or r["location_at"] < pos_fresh:
+        if r["lat"] is None or not r["location_at"] or r["location_at"] < min(pos_fresh, away_since):
             hidden += 1
             continue
         drivers.append({"id": r["id"], "name": r["name"], "phone": r["phone"], "lat": r["lat"], "lng": r["lng"],
                         "vehicle_type": r["vehicle_type"], "availability": r["availability"], "approval": r["approval"],
-                        "seen_min": minutes_ago(r["last_seen_at"]), "pos_min": minutes_ago(r["location_at"])})
+                        "seen_min": minutes_ago(r["last_seen_at"]), "pos_min": minutes_ago(r["location_at"]),
+                        "away": minutes_ago(r["last_seen_at"]) > ONLINE_WINDOW_MIN})
     rows = db.execute(
         """SELECT u.id, u.name, u.phone, u.last_seen_at, p.lat, p.lng, p.at
            FROM users u LEFT JOIN user_positions p ON p.user_id=u.id
@@ -2022,19 +2031,22 @@ def admin_map():
 @app.get("/api/admin/online")
 @auth_required("admin")
 def admin_online():
-    """Qui a l'application ouverte à l'écran en ce moment (vu dans les 3 dernières minutes)."""
+    """Qui est en ligne : application ouverte (vu il y a moins de 3 min) ; les chauffeurs disponibles restent en ligne 2 h après avoir quitté l'application."""
     db = get_db()
     since = ts(now() - timedelta(minutes=ONLINE_WINDOW_MIN))
+    away_since = ts(now() - timedelta(minutes=DRIVER_AWAY_MIN))
     rows = db.execute(
         """SELECT u.id, u.role, u.name, u.phone, u.last_seen_at, d.vehicle_type, d.availability, d.approval
            FROM users u LEFT JOIN drivers d ON d.user_id=u.id
-           WHERE u.role IN ('client','driver') AND u.is_blocked=0 AND u.last_seen_at>=?
-           ORDER BY u.last_seen_at DESC LIMIT 300""", (since,)).fetchall()
+           WHERE u.role IN ('client','driver') AND u.is_blocked=0
+             AND (u.last_seen_at>=? OR (u.role='driver' AND d.availability IN ('available','busy') AND u.last_seen_at>=?))
+           ORDER BY u.last_seen_at DESC LIMIT 300""", (since, away_since)).fetchall()
     out = {"clients": [], "drivers": []}
     for r in rows:
         item = {"id": r["id"], "name": r["name"], "phone": r["phone"], "seen_min": minutes_ago(r["last_seen_at"])}
         if r["role"] == "driver":
-            item.update(vehicle_type=r["vehicle_type"], availability=r["availability"], approval=r["approval"])
+            item.update(vehicle_type=r["vehicle_type"], availability=r["availability"], approval=r["approval"],
+                        away=item["seen_min"] > ONLINE_WINDOW_MIN)
             out["drivers"].append(item)
         else:
             out["clients"].append(item)

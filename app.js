@@ -16,8 +16,14 @@ const COMMUNE_COORDS = {
   'Séguéla': [7.9611, -6.6731], 'Soubré': [5.7856, -6.5944], 'Yamoussoukro': [6.8276, -5.2893],
 };
 
+const SUPPORT_WA = '0140062296';   // numéro WhatsApp de l'assistance
+function saveToken(t, remember) {
+  try { localStorage.removeItem('ss_token'); sessionStorage.removeItem('ss_token'); (remember ? localStorage : sessionStorage).setItem('ss_token', t); } catch { /* stockage indisponible */ }
+}
+function clearToken() { try { localStorage.removeItem('ss_token'); sessionStorage.removeItem('ss_token'); } catch { /* rien */ } }
+
 const state = {
-  token: localStorage.getItem('ss_token') || null,
+  token: localStorage.getItem('ss_token') || sessionStorage.getItem('ss_token') || null,
   user: null, driver: null, meta: null,
   pos: null,            // {lat, lng, source: 'gps'|'map'|'commune'}
   tab: null, timers: [], map: null, layers: null, meMarker: null,
@@ -73,7 +79,7 @@ async function api(path, opts = {}) {
 
 function sessionLost() {
   if (!state.user) return;
-  localStorage.removeItem('ss_token');
+  clearToken();
   state.token = null; state.user = null; state.driver = null;
   stopLocSharing();
   render();
@@ -760,7 +766,7 @@ function adminMap() {
   });
   map.on('popupclose', () => { popupOpen = false; });
   const st = { available: ['avail', 'disponible'], busy: ['busy', 'en course'], unavailable: ['off', 'indisponible'] };
-  const popup = (u, kind, extra) => `<b>${esc(u.name)}</b><br><span class="muted">${kind}${extra || ''}</span><br><span class="muted">${esc(fmtPhone(u.phone))} · vu ${ago(u.seen_min)}</span><br><span class="muted">position ${ago(u.pos_min)}</span><div style="margin-top:8px"><button class="btn btn-sm btn-block" data-callu="${u.id}" data-name="${esc(u.name)}">${ic('phone')} Appeler (Sunrise)</button></div>`;
+  const popup = (u, kind, extra) => `<b>${esc(u.name)}</b><br><span class="muted">${kind}${extra || ''}${u.away ? ' · 📴 app fermée' : ''}</span><br><span class="muted">${esc(fmtPhone(u.phone))} · vu ${ago(u.seen_min)}</span><br><span class="muted">position ${ago(u.pos_min)}</span><div style="margin-top:8px"><button class="btn btn-sm btn-block" data-callu="${u.id}" data-name="${esc(u.name)}">${ic('phone')} Appeler (Sunrise)</button></div>`;
   async function load() {
     if (popupOpen || state.map !== map) return;
     try {
@@ -824,13 +830,14 @@ function renderAuth() {
   const communes = (state.meta.communes || []).map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
   $('#app').innerHTML = `
     <div class="auth-scene" id="scene" style="--rise:.12">
+      <header class="auth-bar"><button type="button" class="bar-menu" id="auth-menu" aria-label="Menu"><span></span><span></span><span></span></button><b>SUNRISE SPACE</b><i></i></header>
       <div class="sky" aria-hidden="true"><div class="dawn"></div><div class="sun"></div>
         <svg class="land" viewBox="0 0 400 140" preserveAspectRatio="none"><path d="M0 70 C60 40 120 60 190 48 C260 36 330 62 400 44 L400 140 L0 140Z" fill="#0F2547"/><path d="M0 100 L0 80 h22 v-18 h16 v18 h14 v-30 h18 v30 h20 v-12 h14 v12 h26 v-22 h16 v22 h18 v-34 h16 v34 h22 v-16 h14 v16 h24 v-26 h16 v26 h18 v-12 h22 v12 h24 H400 V140 H0Z" fill="#081630"/></svg>
       </div>
       <div class="auth-wrap">
         <header class="auth-head">
           <img src="/icon-192.png" alt="Logo Sunrise Space" width="64" height="64">
-          <h1>Sunrise Space</h1>
+          <h1 class="vh">Sunrise Space</h1>
           <p id="auth-sub">Bon retour. Connectez-vous pour demander ou recevoir une course.</p>
         </header>
         <section class="glass">
@@ -848,6 +855,7 @@ function renderAuth() {
           <label id="f-name" hidden>Nom complet<input name="name" autocomplete="name" maxlength="60" placeholder="Ex. Awa Koné"></label>
           <label>Numéro de téléphone<span class="fld"><i class="fi">${AUTH_ICONS.phone}</i><input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="07 07 07 07 07" maxlength="18" required></span></label>
           <label>Mot de passe<span class="fld"><i class="fi">${AUTH_ICONS.lock}</i><input name="password" type="password" autocomplete="current-password" minlength="6" placeholder="Au moins 6 caractères" required><button type="button" class="eye" id="eye" aria-label="Afficher le mot de passe" aria-pressed="false">${AUTH_ICONS.eye}</button></span></label>
+          <label class="remember" id="remember-box"><span class="switch"><input type="checkbox" name="remember" checked><i></i></span><span>Se souvenir de moi</span></label>
           <button type="button" class="link" id="forgot">Mot de passe oublié ?</button>
           <div id="driver-box" class="stack" hidden>
             <label>Votre véhicule<select name="vehicle_type">${Object.entries(VEHICLES).map(([k, v]) => `<option value="${k}">${v.icon} ${esc(v.label)}</option>`).join('')}</select></label>
@@ -864,6 +872,9 @@ function renderAuth() {
           <button class="btn btn-block" id="auth-submit" type="submit">Se connecter</button>
         </form>
         </section>
+        <nav class="auth-bottom" aria-label="Aide">
+          <button type="button" id="b-assist">Assistance</button><a href="/bienvenue.html">Qui sommes-nous ?</a>
+        </nav>
         <ul class="trust" aria-label="Nos engagements">
           <li>${FEAT_ICONS.shield}<span>Chauffeurs vérifiés</span></li>
           <li>${FEAT_ICONS.call}<span>Appel gratuit</span></li>
@@ -888,6 +899,7 @@ function renderAuth() {
     $('#auth-submit').textContent = reg ? 'Créer mon compte' : 'Se connecter';
     $('#auth-sub').textContent = reg ? 'Créez votre compte en une minute.' : 'Bon retour. Connectez-vous pour demander ou recevoir une course.';
     $('#forgot').hidden = reg;
+    $('#remember-box').hidden = reg;
     $('#auth-legal').hidden = !reg;
     form.password.autocomplete = reg ? 'new-password' : 'current-password';
     err.hidden = true;
@@ -895,6 +907,18 @@ function renderAuth() {
   $$('[data-mode]').forEach((b) => (b.onclick = () => { mode = b.dataset.mode; sync(); }));
   $$('[data-role]').forEach((b) => (b.onclick = () => { role = b.dataset.role; sync(); }));
   $('#forgot').onclick = () => openForgot(form.phone.value);
+  const assist = () => window.open(waLink(SUPPORT_WA, "Bonjour, j'ai besoin d'aide pour Sunrise Space."), '_blank', 'noopener');
+  $('#b-assist').onclick = assist;
+  $('#auth-menu').onclick = () => {
+    const m = modal(`<h2>Menu</h2><div class="list">
+      <a class="card flat" href="/bienvenue.html">ℹ️ Qui sommes-nous ?</a>
+      <button type="button" class="card flat" id="m-assist" style="text-align:left">💬 Assistance WhatsApp</button>
+      <a class="card flat" href="/confidentialite" target="_blank" rel="noopener">🔒 Confidentialité</a>
+      <a class="card flat" href="/conditions" target="_blank" rel="noopener">📄 Conditions d'utilisation</a></div>
+      <button class="btn btn-ghost" id="m-close">Fermer</button>`);
+    $('#m-assist', m.el).onclick = assist;
+    $('#m-close', m.el).onclick = () => m.close();
+  };
   // Le soleil se lève au fur et à mesure que le formulaire se remplit.
   const scene = $('#scene');
   const rise = () => {
@@ -925,7 +949,7 @@ function renderAuth() {
         data = await api('/api/auth/register', { method: 'POST', body });
       }
       state.token = data.token;
-      localStorage.setItem('ss_token', data.token);
+      saveToken(data.token, mode === 'register' || form.remember.checked);
       state.user = data.user; state.driver = data.driver;
       render();
       if (mode === 'register') toast(role === 'driver' ? 'Compte créé. Validation en cours.' : 'Bienvenue sur Sunrise Space !');
@@ -1015,7 +1039,7 @@ async function logout() {
   if (callState.id || callState.pc) await hangUp();
   await forgetPush();   // cet appareil ne doit plus recevoir les notifications de ce compte
   try { await api('/api/auth/logout', { method: 'POST' }); } catch { /* on se déconnecte quand même */ }
-  localStorage.removeItem('ss_token');
+  clearToken();
   stopLocSharing();
   state.token = null; state.user = null; state.driver = null; state.pos = null;
   render();
@@ -1806,7 +1830,7 @@ function confirmRestore(backup, info) {
     }
     m.close();
     clearInterval(state.unreadTimer);
-    localStorage.removeItem('ss_token');
+    clearToken();
     stopLocSharing();
     state.token = null; state.user = null; state.driver = null; state.pos = null;
     render();
@@ -1847,10 +1871,10 @@ async function adminStats() {
   async function loadOnline() {
     try {
       const o = await api('/api/admin/online');
-      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''} · ${ago(u.seen_min)}</span> <button class="btn btn-sm" data-callu="${u.id}" data-name="${esc(u.name)}" aria-label="Appeler ${esc(u.name)} dans l'application">${ic('phone')} Appeler</button></li>`;
+      const row = (u, extra) => `<li><span class="dotlive"></span><b>${esc(u.name)}</b> <span class="muted">${esc(fmtPhone(u.phone))}${extra || ''}${u.away ? ' · 📴 app fermée' : ''} · ${ago(u.seen_min)}</span> <button class="btn btn-sm" data-callu="${u.id}" data-name="${esc(u.name)}" aria-label="Appeler ${esc(u.name)} dans l'application">${ic('phone')} Appeler</button></li>`;
       const dst = { available: ' · 🟢 disponible', busy: ' · 🔴 en course', unavailable: ' · ⚪ indisponible' };
       $('#online').innerHTML = `<section class="card stack"><h3>🟢 En ligne maintenant</h3>
-        <p class="muted tiny">Application ouverte à l'écran dans les 3 dernières minutes.</p>
+        <p class="muted tiny">Application ouverte, ou chauffeur disponible ayant quitté l'application il y a moins de 2 h (📴 = application fermée, il reçoit toujours les demandes par notification).</p>
         <h4>Chauffeurs (${o.drivers.length})</h4>${o.drivers.length ? `<ul class="onlist">${o.drivers.map((u) => row(u, ` · ${veh(u.vehicle_type).icon}${dst[u.availability] || ''}`)).join('')}</ul>` : '<p class="muted">Aucun chauffeur en ligne.</p>'}
         <h4>Clients (${o.clients.length})</h4>${o.clients.length ? `<ul class="onlist">${o.clients.map((u) => row(u)).join('')}</ul>` : '<p class="muted">Aucun client en ligne.</p>'}</section>`;
     } catch (e) { if (e.status !== 401) toast(e.message, 'bad'); }
@@ -2380,7 +2404,7 @@ async function boot() {
   catch { state.meta = { communes: [], report_reasons: {}, default_center: { lat: 5.36, lng: -4.0083 } }; }
   if (state.token) {
     try { const r = await api('/api/me'); state.user = r.user; state.driver = r.driver; }
-    catch (e) { if (e.status === 401 || e.status === 403) { localStorage.removeItem('ss_token'); state.token = null; } }
+    catch (e) { if (e.status === 401 || e.status === 403) { clearToken(); state.token = null; } }
   }
   render();
 }
