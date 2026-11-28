@@ -34,7 +34,7 @@ a:focus-visible{outline:3px solid var(--night);outline-offset:2px}
 </head>
 <body>
 <header><div class="in"><a href="/"><img src="/icon-192.png" width="28" height="28" alt="">Sunrise Space</a>
-<h1>Politique de confidentialité</h1><p>Dernière mise à jour : 22 novembre 2026</p></div></header>
+<h1>Politique de confidentialité</h1><p>Dernière mise à jour : 28 novembre 2026</p></div></header>
 <main>
 <section><h2>L'essentiel</h2><ul>
 <li>Nous collectons le <b>minimum</b> pour mettre un client en relation avec un chauffeur.</li>
@@ -48,13 +48,15 @@ a:focus-visible{outline:3px solid var(--night);outline-offset:2px}
 <li><b>Position :</b> votre position GPS, <b>seulement quand l'application est ouverte</b> et que vous l'avez autorisée. Nous gardons la dernière position connue, pas l'historique de vos déplacements.</li>
 <li><b>Courses :</b> départ, destination, état, horaires, note donnée au chauffeur.</li>
 <li><b>Messages et signalements</b> échangés avec l'équipe Sunrise Space.</li>
-<li><b>Notifications :</b> l'identifiant technique de votre téléphone, si vous activez les notifications.</li>
+<li><b>Notifications :</b> l'identifiant technique de votre téléphone (jeton de notification), si vous activez les notifications.</li>
+<li><b>Connexions :</b> la date, l'heure, le type d'appareil et l'adresse IP de vos dernières connexions (200 au plus par compte), pour la sécurité du compte et pour mesurer la fréquentation du service.</li>
 <li><b>Appels :</b> la voix passe directement d'un téléphone à l'autre. Elle n'est <b>ni enregistrée ni écoutée</b> par nous.</li></ul></section>
 
 <section><h2>À quoi servent ces données</h2><ul>
 <li>Trouver un chauffeur proche et suivre son arrivée.</li>
 <li>Vérifier les chauffeurs et protéger la communauté (signalements, suspension d'un compte).</li>
 <li>Vous prévenir d'une course, d'un appel ou d'un message.</li>
+<li>Sécuriser votre compte et repérer les connexions inhabituelles.</li>
 <li>Mesurer l'usage du service (nombre de courses, d'inscrits) de façon globale pour l'améliorer.</li></ul>
 <p class="muted">En cas de signalement grave, l'équipe peut consulter la dernière position connue de la personne concernée, uniquement pour traiter ce signalement.</p></section>
 
@@ -67,20 +69,34 @@ a:focus-visible{outline:3px solid var(--night);outline-offset:2px}
 <p>Pour fonctionner, l'application s'appuie sur des prestataires qui peuvent traiter des données techniques :</p><ul>
 <li>un hébergeur cloud pour le serveur et la base de données ;</li>
 <li>OpenStreetMap (cartes, recherche de lieux), OSRM (calcul d'itinéraire) et Esri (carte satellite) : ils reçoivent les coordonnées nécessaires à l'affichage de la carte ;</li>
-<li>les services de notification de votre téléphone (Apple, Google) et un serveur de connexion (STUN) pour les appels.</li></ul></section>
+<li>les services de notification de votre téléphone (Apple, Google) ; pour l'application Android, Google Firebase Cloud Messaging, qui reçoit le jeton de notification et le texte de la notification ;</li>
+<li>un serveur de connexion (STUN) pour les appels.</li></ul></section>
+
+<section><h2>Autorisations de l'application Android</h2><ul>
+<li><b>Position :</b> pour trouver un chauffeur proche ou signaler où vous êtes, seulement quand vous utilisez l'application.</li>
+<li><b>Microphone :</b> pour les appels entre client et chauffeur dans l'application. La voix n'est pas enregistrée.</li>
+<li><b>Notifications :</b> pour vous prévenir d'une demande de course, d'un appel ou d'un message.</li>
+<li><b>Photos et fichiers :</b> seulement si vous choisissez d'envoyer une photo ou un document.</li></ul>
+<p class="muted">Vous pouvez retirer ces autorisations à tout moment dans les réglages de votre téléphone.</p></section>
 
 <section><h2>Combien de temps nous gardons vos données</h2><ul>
 <li>Votre compte et vos courses : tant que votre compte existe.</li>
 <li>Votre position : seule la dernière est conservée, elle est remplacée à chaque mise à jour.</li>
-<li>Après suppression du compte, vos données sont effacées. Des copies de sauvegarde de sécurité peuvent mettre un court délai à disparaître.</li></ul></section>
+<li>Journal des connexions : les 200 dernières par compte.</li>
+<li>Après suppression du compte, vos données sont effacées de la base du service. Des copies de sauvegarde de sécurité peuvent mettre jusqu'à 30 jours à disparaître.</li></ul></section>
 
 <section><h2>Cookies et stockage</h2>
 <p>Sunrise Space n'utilise <b>pas de cookies</b>. Votre téléphone garde seulement un jeton de connexion et quelques préférences (par exemple la sirène des demandes) pour que vous restiez connecté. Ils sont strictement nécessaires au fonctionnement : aucun bandeau de consentement n'est donc requis. Nous n'utilisons aucun outil de publicité ni de suivi tiers.</p></section>
 
 <section><h2>Vos droits</h2>
 <p>Conformément à la loi ivoirienne n° 2013-450 du 19 juin 2013 relative à la protection des données à caractère personnel, vous pouvez à tout moment :</p><ul>
-<li>consulter et corriger vos informations ;</li><li>demander la suppression de votre compte et de vos données ;</li><li>vous opposer à un usage de vos données ou retirer votre autorisation de position dans les réglages de votre téléphone.</li></ul>
+<li>consulter et corriger vos informations ;</li><li><a href="#suppression">supprimer votre compte et vos données</a> vous-même dans l'application ;</li><li>vous opposer à un usage de vos données ou retirer votre autorisation de position dans les réglages de votre téléphone.</li></ul>
 <p>Pour cela, écrivez-nous depuis l'application, onglet <b>Messages</b>. Vous pouvez aussi saisir l'Autorité de régulation des télécommunications/TIC de Côte d'Ivoire (ARTCI), qui veille à la protection des données personnelles.</p></section>
+
+<section id="suppression"><h2>Supprimer votre compte et vos données</h2>
+<ul><li><b>Dans l'application :</b> onglet <b>Compte</b> (👤) → <b>Supprimer mon compte</b>, puis saisissez votre mot de passe et le mot SUPPRIMER. La suppression est immédiate et définitive.</li>
+<li><b>Sans accès à l'application :</b> suivez les étapes de la page <a href="/suppression-compte">Supprimer mon compte</a>.</li></ul>
+<p class="muted">Sont effacés : votre compte, votre profil chauffeur, vos messages, vos courses, vos signalements, votre journal de connexions et vos jetons de notification.</p></section>
 
 <section><h2>Enfants</h2><p>Sunrise Space est réservé aux personnes de 18 ans et plus.</p></section>
 
@@ -88,6 +104,6 @@ a:focus-visible{outline:3px solid var(--night);outline-offset:2px}
 
 <a class="btn" href="/">Retour à l'application</a>
 </main>
-<footer><a href="/">Ouvrir l'application</a><a href="/bienvenue.html">Qui sommes-nous ?</a><a href="/confidentialite">Confidentialité</a><a href="/conditions">Conditions</a></footer>
+<footer><a href="/">Ouvrir l'application</a><a href="/suppression-compte">Supprimer mon compte</a><a href="/bienvenue.html">Qui sommes-nous ?</a><a href="/confidentialite">Confidentialité</a><a href="/conditions">Conditions</a></footer>
 </body>
 </html>

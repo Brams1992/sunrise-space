@@ -567,7 +567,17 @@ window.addEventListener('offline', () => netBar(true));
 window.addEventListener('online', () => netBar(false));
 
 /* ---------- Notifications push : prévenu même application fermée ---------- */
-const PUSH_OK = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+/* Application Android native (WebView) : les notifications passent par Firebase, pas par le navigateur */
+const IS_NATIVE = /SunriseApp/.test(navigator.userAgent);
+const nativeToken = () => { try { return (window.SunriseNative && window.SunriseNative.getToken()) || ''; } catch { return ''; } };
+async function syncFcm() {
+  const t = nativeToken();
+  if (!IS_NATIVE || !t || !state.user) return;
+  try { await api('/api/push/fcm', { method: 'POST', body: { token: t } }); } catch { /* sera réessayé à la prochaine ouverture */ }
+}
+window.__onFcmToken = () => { syncFcm(); };                                              // appelé par l'application Android
+window.__onNativePush = () => { try { if (state.onPush) state.onPush(); checkIncomingCall(); } catch { /* rien */ } };   // message reçu pendant que l'application est ouverte
+const PUSH_OK = !IS_NATIVE && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
 const IS_STANDALONE = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
 const IS_IOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
 
@@ -600,6 +610,11 @@ async function enablePush() {
 }
 
 async function forgetPush() {
+  if (IS_NATIVE) {
+    const t = nativeToken();
+    try { if (t) await api('/api/push/fcm/remove', { method: 'POST', body: { token: t } }); } catch { /* rien */ }
+    return;
+  }
   try {
     if (!PUSH_OK) return;
     const reg = await navigator.serviceWorker.ready;
@@ -717,6 +732,7 @@ function renderShell(role, tabs) {
   clearInterval(state.unreadTimer);
   if (role === 'validator') return;   // pas de messagerie ni de notifications pour un validateur
   syncPush();
+  syncFcm();
   refreshUnread();
   if (role === 'client' || role === 'driver') startCallWatcher();
   if (role === 'client') startPresence();
@@ -1034,6 +1050,35 @@ function renderForcedChange() {
   $('#pw-out').onclick = logout;
 }
 
+/* Suppression de son propre compte (exigée par le Play Store) */
+function openDeleteAccount() {
+  const m = modal(`<h2>Supprimer mon compte</h2>
+    <p class="muted">Votre compte, vos courses, vos messages et votre profil seront effacés <b>définitivement</b>. Cette action ne peut pas être annulée.</p>
+    <form id="delf" class="form" novalidate>
+      <label>Mot de passe<input name="pw" type="password" autocomplete="current-password" required></label>
+      <label>Tapez SUPPRIMER pour confirmer<input name="confirm" autocomplete="off" autocapitalize="characters" required></label>
+      <p class="banner bad" id="del-err" role="alert" hidden></p>
+      <div class="row"><button type="button" class="btn btn-ghost grow" id="del-cancel">Annuler</button><button class="btn btn-danger grow" type="submit" id="del-ok">Supprimer</button></div>
+    </form>`);
+  $('#del-cancel', m.el).onclick = () => m.close();
+  const form = $('#delf', m.el), err = $('#del-err', m.el), ok = $('#del-ok', m.el);
+  form.onsubmit = async (ev) => {
+    ev.preventDefault();
+    err.hidden = true;
+    ok.disabled = true;
+    try {
+      await api('/api/me/delete', { method: 'POST', body: { password: form.pw.value, confirm: form.confirm.value } });
+      m.close();
+      await forgetPush();
+      clearToken();
+      stopLocSharing();
+      state.token = null; state.user = null; state.driver = null; state.pos = null;
+      render();
+      toast('Votre compte a été supprimé.');
+    } catch (e) { err.textContent = e.message; err.hidden = false; ok.disabled = false; }
+  };
+}
+
 async function logout() {
   clearInterval(state.unreadTimer); clearInterval(state.callTimer); clearInterval(state.posTimer);
   if (callState.id || callState.pc) await hangUp();
@@ -1063,12 +1108,14 @@ function accountView() {
       ${state.user && state.user.role === 'driver' ? `<div class="row"><button class="btn btn-ghost grow" id="btn-alarm">${alarmEnabled() ? '🔊 Sirène des demandes : activée' : '🔇 Sirène des demandes : coupée'}</button><button class="btn btn-ghost btn-sm" id="btn-alarm-test">Tester</button></div>` : ''}
       <button class="btn btn-ghost btn-block" id="btn-pw">🔒 Changer mon mot de passe</button>
       <button class="btn btn-dark btn-block" id="btn-logout">Se déconnecter</button>
+      <button class="link" type="button" id="btn-del" style="justify-self:center">Supprimer mon compte</button>
     </section>
     <section class="card flat"><h3>À propos</h3>
       <p class="muted">Sunrise Space met en relation clients et chauffeurs (moto-taxi, taxi, tricycle) partout en Côte d'Ivoire. Le prix de la course se discute directement avec le chauffeur et se règle en espèces.</p>
     </section>`;
   $('#btn-pw').onclick = openChangePassword;
   $('#btn-logout').onclick = logout;
+  $('#btn-del').onclick = openDeleteAccount;
   const ba = $('#btn-alarm');
   if (ba) {
     ba.onclick = () => { try { localStorage.setItem('ss_alarm', alarmEnabled() ? '0' : '1'); } catch { /* rien */ } accountView(); };
@@ -2042,8 +2089,34 @@ async function adminUsers() {
       <p class="muted tiny">Chaque connexion de vos utilisateurs : qui, quand, avec quel appareil.</p>
       <div class="row"><button class="btn btn-sm" id="jopen">Voir le journal</button><button class="btn btn-sm btn-ghost" id="fopen">📊 Fréquentation</button></div>
     </section>
+    <section class="card stack">
+      <h3>📲 Application Android</h3>
+      <p class="muted tiny">Version publiée, lien de téléchargement direct et mise à jour obligatoire.</p>
+      <div class="row"><button class="btn btn-sm" id="aopen">Voir</button></div>
+    </section>
     <div id="ft"></div><div id="ul" class="list cols"></div><div id="bin"></div><div id="vals"></div>`;
   loadValidators();
+  $('#aopen').onclick = async () => {
+    const { el, close } = modal(`<h2>📲 Application Android</h2><div id="ab">Chargement…</div><button class="btn btn-ghost" data-close>Fermer</button>`);
+    el.querySelector('[data-close]').onclick = close;
+    const link = `${location.origin}/app/sunrise-space.apk`;
+    async function aload() {
+      try {
+        const { release: r } = await api('/api/admin/app-release');
+        const box = el.querySelector('#ab');
+        if (!r) { box.innerHTML = '<p class="muted">Aucune version publiée pour le moment. Elle apparaît ici après la première compilation sur GitHub.</p>'; return; }
+        box.innerHTML = `<div class="card flat"><p><b>Version ${esc(r.versionName)}</b> <span class="muted tiny">(n° ${r.versionCode})</span></p>
+          <p class="muted">Publiée le ${esc(fmtWhen(r.createdAt))} · ${(r.size / 1048576).toFixed(1)} Mo</p>
+          ${r.notes ? `<p class="muted tiny">${esc(r.notes)}</p>` : ''}</div>
+          <p class="muted tiny">Lien de téléchargement direct :</p><p class="card flat tiny" style="word-break:break-all">${esc(link)}</p>
+          <div class="row"><button class="btn btn-sm grow" id="acopy">Copier le lien</button>
+          <button class="btn btn-sm btn-ghost grow" id="aforce">${r.force ? '🔒 Mise à jour obligatoire : OUI' : '🔓 Mise à jour obligatoire : non'}</button></div>`;
+        el.querySelector('#acopy').onclick = async () => { try { await navigator.clipboard.writeText(link); toast('Lien copié ✅'); } catch { toast(link); } };
+        el.querySelector('#aforce').onclick = async () => { try { await api('/api/admin/app-release', { method: 'POST', body: { force: !r.force } }); aload(); } catch (e) { toast(e.message, 'bad'); } };
+      } catch (e) { el.querySelector('#ab').innerHTML = `<p class="muted">${esc(e.message)}</p>`; }
+    }
+    aload();
+  };
   $('#fopen').onclick = () => {
     const { el, close } = modal(`<h2>📊 Fréquentation</h2><div id="ff"></div><div id="fb">Chargement…</div><button class="btn btn-ghost" data-close>Fermer</button>`);
     el.querySelector('[data-close]').onclick = close;

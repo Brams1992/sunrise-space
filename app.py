@@ -5,6 +5,7 @@ Mise en relation clients <-> chauffeurs de moto-taxi, Côte d'Ivoire.
 Lancer :  python app.py      (http://localhost:5000)
 """
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -141,6 +142,23 @@ CREATE TABLE IF NOT EXISTS push_subscriptions(
   endpoint TEXT NOT NULL UNIQUE,
   p256dh TEXT NOT NULL,
   auth TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fcm_tokens(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS app_releases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  version_code INTEGER NOT NULL,
+  version_name TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT '',
+  force_update INTEGER NOT NULL DEFAULT 0,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  apk BLOB NOT NULL,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS safety_copies(
@@ -504,7 +522,7 @@ def issue_token(db, user_id):
 
 
 # Un « validateur » est un compte admin à accès réduit (staff_scope='validator') : il ne peut appeler QUE ces pages.
-VALIDATOR_ENDPOINTS = {"admin_drivers", "admin_driver_approval", "admin_users", "me", "logout", "change_password", "push_key", "push_subscribe", "push_unsubscribe"}
+VALIDATOR_ENDPOINTS = {"admin_drivers", "admin_driver_approval", "admin_users", "me", "logout", "change_password", "push_key", "push_subscribe", "push_unsubscribe", "push_fcm", "push_fcm_remove"}
 
 
 def auth_required(*roles):
@@ -682,9 +700,10 @@ def compress(resp):
 PUBLIC_FILES = {
     "index.html", "bienvenue.html", "bienvenue.js", "app.js", "style.css", "sw.js", "manifest.webmanifest",
     "icon.svg", "icon-192.png", "icon-512.png", "icon-maskable-512.png", "favicon-32.png", "og-image.png",
-    "confidentialite.html", "conditions.html", "404.html", "fondateur.jpg",
+    "confidentialite.html", "conditions.html", "suppression-compte.html", "404.html", "fondateur.jpg",
 }
-PAGES = {"bienvenue": "bienvenue.html", "confidentialite": "confidentialite.html", "conditions": "conditions.html"}
+PAGES = {"bienvenue": "bienvenue.html", "confidentialite": "confidentialite.html", "conditions": "conditions.html",
+         "suppression-compte": "suppression-compte.html"}
 
 
 @app.get("/")
@@ -709,7 +728,7 @@ def robots():
 @app.get("/sitemap.xml")
 def sitemap():
     base = request.url_root.rstrip("/")
-    urls = ["/", "/bienvenue", "/confidentialite", "/conditions"]
+    urls = ["/", "/bienvenue", "/confidentialite", "/conditions", "/suppression-compte"]
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            + "".join(f"  <url><loc>{base}{u}</loc></url>\n" for u in urls) + "</urlset>\n")
     return Response(xml, mimetype="application/xml")
@@ -1283,17 +1302,129 @@ def _deliver(subs, payload):
     threading.Thread(target=work, daemon=True).start()
 
 
+# ---------- Application Android : notifications Firebase (FCM) ----------
+FCM_ACCOUNT_JSON = os.environ.get("FCM_SERVICE_ACCOUNT_JSON", "").strip()   # contenu du fichier « clé privée » du compte de service Firebase
+_fcm_cache = {"acc": None, "token": None, "exp": 0.0}
+_fcm_lock = threading.Lock()
+
+
+def fcm_account():
+    if _fcm_cache["acc"] is None:
+        try:
+            _fcm_cache["acc"] = json.loads(FCM_ACCOUNT_JSON, strict=False) if FCM_ACCOUNT_JSON else {}
+        except Exception:
+            _fcm_cache["acc"] = {}
+    return _fcm_cache["acc"]
+
+
+def fcm_enabled():
+    acc = fcm_account()
+    return bool(acc.get("private_key") and acc.get("client_email") and acc.get("project_id"))
+
+
+def fcm_access_token():
+    """Jeton OAuth2 du compte de service (valable 1 h, gardé en mémoire)."""
+    with _fcm_lock:
+        if _fcm_cache["token"] and _fcm_cache["exp"] > time.time() + 120:
+            return _fcm_cache["token"]
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        acc = fcm_account()
+        t = int(time.time())
+        head = b64u(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        claims = b64u(json.dumps({"iss": acc["client_email"], "scope": "https://www.googleapis.com/auth/firebase.messaging",
+                                  "aud": "https://oauth2.googleapis.com/token", "iat": t, "exp": t + 3600}).encode())
+        key = serialization.load_pem_private_key(acc["private_key"].encode(), password=None)
+        sig = key.sign(f"{head}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        data = urlencode({"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": f"{head}.{claims}.{b64u(sig)}"}).encode()
+        with urllib.request.urlopen(urllib.request.Request("https://oauth2.googleapis.com/token", data=data, method="POST"), timeout=10) as r:
+            out = json.loads(r.read())
+        _fcm_cache["token"] = out["access_token"]
+        _fcm_cache["exp"] = time.time() + int(out.get("expires_in", 3600))
+        return _fcm_cache["token"]
+
+
+def _fcm_send_one(token, data, ttl_s):
+    try:
+        msg = {"message": {"token": token, "data": {k: str(v) for k, v in data.items()},
+                           "android": {"priority": "HIGH", "ttl": f"{int(ttl_s)}s"}}}
+        req = urllib.request.Request(
+            f"https://fcm.googleapis.com/v1/projects/{fcm_account()['project_id']}/messages:send",
+            data=json.dumps(msg).encode(), method="POST",
+            headers={"Authorization": "Bearer " + fcm_access_token(), "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=8).close()
+        return "ok"
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "gone"
+        if e.code == 400:
+            try:
+                txt = e.read().decode("utf-8", "ignore").lower()
+            except Exception:
+                txt = ""
+            return "gone" if ("unregistered" in txt or "registration token" in txt) else "error"
+        return "error"
+    except Exception:
+        app.logger.exception("envoi FCM")
+        return "error"
+
+
+def _fcm_deliver(tokens, data, ttl_s=60):
+    """Envoi en arrière-plan aux appareils Android (message « data » à priorité haute : l'application sonne elle-même)."""
+    def work():
+        db = DB()
+        try:
+            for tok in tokens:
+                if _fcm_send_one(tok, data, ttl_s) == "gone":
+                    db.execute("DELETE FROM fcm_tokens WHERE token=?", (tok,))
+                    db.commit()
+        except Exception:
+            pass
+        finally:
+            db.close()
+    threading.Thread(target=work, daemon=True).start()
+
+
+def fcm_tokens_by_user(db, user_ids):
+    ids = list({int(i) for i in user_ids})
+    if not ids or not fcm_enabled():
+        return {}
+    marks = ",".join("?" * len(ids))
+    out = {}
+    for r in db.execute(f"SELECT user_id, token FROM fcm_tokens WHERE user_id IN ({marks})", ids).fetchall():
+        out.setdefault(r["user_id"], []).append(r["token"])
+    return out
+
+
+def fcm_stop(db, user_ids, rid):
+    """La demande est prise ou annulée : on coupe la sonnerie sur les téléphones Android."""
+    tokens = [t for lst in fcm_tokens_by_user(db, user_ids).values() for t in lst]
+    if tokens:
+        _fcm_deliver(tokens, {"type": "stop", "tag": f"req-{rid}"}, 60)
+
+
 def notify_users(db, user_ids, title, body_text, tag=None, urgent=False):
-    """Prévient ces utilisateurs sur tous leurs appareils abonnés."""
+    """Prévient ces utilisateurs : application Android (FCM) si installée, sinon notification web sur leurs appareils abonnés."""
     ids = list({int(i) for i in user_ids})
     if not ids:
         return 0
-    marks = ",".join("?" * len(ids))
-    subs = [dict(r) for r in db.execute(
-        f"SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN ({marks})", ids).fetchall()]
-    if subs:
-        _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/", "urgent": bool(urgent)}).encode())
-    return len(subs)
+    by_user = fcm_tokens_by_user(db, ids)
+    sent = 0
+    tokens = [t for lst in by_user.values() for t in lst]
+    if tokens:
+        ring = bool(urgent and (tag or "").startswith("req-"))   # sonnerie d'appel seulement pour les demandes de course
+        _fcm_deliver(tokens, {"type": "ring" if ring else "notify", "title": title, "body": body_text, "tag": tag or "sunrise"},
+                     60 if ring else 1800)
+        sent += len(tokens)
+    web_ids = [i for i in ids if i not in by_user]
+    if web_ids:
+        marks = ",".join("?" * len(web_ids))
+        subs = [dict(r) for r in db.execute(
+            f"SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id IN ({marks})", web_ids).fetchall()]
+        if subs:
+            _deliver(subs, json.dumps({"title": title, "body": body_text, "tag": tag or "sunrise", "url": "/", "urgent": bool(urgent)}).encode())
+            sent += len(subs)
+    return sent
 
 
 def commune_label(driver):
@@ -1355,6 +1486,122 @@ def push_unsubscribe():
     return jsonify({"ok": True})
 
 
+# ---------- Mises à jour de l'application Android hors Play Store ----------
+UPDATE_TOKEN = os.environ.get("UPDATE_TOKEN", "")      # mot de passe secret que GitHub utilise pour envoyer le nouvel APK
+APP_APK_MAX = 60 * 1024 * 1024
+
+
+def latest_release(db, with_apk=False):
+    cols = "id, version_code, version_name, notes, force_update, size, sha256, created_at" + (", apk" if with_apk else "")
+    return db.execute(f"SELECT {cols} FROM app_releases ORDER BY version_code DESC, id DESC LIMIT 1").fetchone()
+
+
+@app.get("/api/app/version")
+def app_version():
+    """Lue par l'application Android à chaque ouverture : y a-t-il une version plus récente ?"""
+    r = latest_release(get_db())
+    if not r:
+        return jsonify({"versionCode": 0})
+    return jsonify({"versionCode": r["version_code"], "versionName": r["version_name"], "notes": r["notes"],
+                    "force": bool(r["force_update"]), "size": r["size"], "sha256": r["sha256"], "url": "/app/sunrise-space.apk"})
+
+
+@app.get("/app/sunrise-space.apk")
+def app_apk():
+    r = latest_release(get_db(), with_apk=True)
+    if not r:
+        return err("Aucune version disponible.", 404)
+    data = bytes(r["apk"])
+    return Response(data, mimetype="application/vnd.android.package-archive", headers={
+        "Content-Disposition": 'attachment; filename="sunrise-space.apk"', "Content-Length": str(len(data)), "Cache-Control": "no-cache"})
+
+
+@app.post("/api/app/publish")
+def app_publish():
+    """Reçoit le nouvel APK fabriqué par GitHub (protégé par UPDATE_TOKEN)."""
+    if not UPDATE_TOKEN:
+        return err("Publication désactivée : la variable UPDATE_TOKEN n'est pas définie sur le serveur.", 503)
+    given = request.headers.get("Authorization", "")[7:].strip()
+    if not hmac.compare_digest(given.encode(), UPDATE_TOKEN.encode()):
+        return err("Accès refusé.", 403)
+    request.max_content_length = APP_APK_MAX + 1024 * 1024
+    f = request.files.get("apk")
+    data = f.read(APP_APK_MAX + 1) if f else b""
+    if not data or len(data) > APP_APK_MAX:
+        return err("Fichier APK absent ou trop gros.", 413)
+    if not data.startswith(b"PK"):
+        return err("Ce fichier n'est pas un APK.", 400)
+    try:
+        code = int(request.form.get("version_code") or 0)
+    except ValueError:
+        code = 0
+    if code < 1:
+        return err("version_code invalide.", 400)
+    db = get_db()
+    cur = latest_release(db)
+    if cur and code <= cur["version_code"]:
+        return err(f"Version déjà publiée (actuelle : {cur['version_code']}).", 409)
+    force = 1 if str(request.form.get("force") or "").lower() in ("1", "true", "oui") else 0
+    db.execute("INSERT INTO app_releases(version_code,version_name,notes,force_update,size,sha256,apk,created_at) VALUES(?,?,?,?,?,?,?,?)",
+               (code, clean(request.form.get("version_name") or f"1.0.{code}", 30), clean_text(request.form.get("notes"), 500),
+                force, len(data), hashlib.sha256(data).hexdigest(), data, ts()))
+    for r in db.execute("SELECT id FROM app_releases ORDER BY version_code DESC, id DESC").fetchall()[2:]:   # on garde les 2 dernières
+        db.execute("DELETE FROM app_releases WHERE id=?", (r["id"],))
+    db.commit()
+    return jsonify({"ok": True, "versionCode": code}), 201
+
+
+@app.get("/api/admin/app-release")
+@auth_required("admin")
+def admin_app_release():
+    r = latest_release(get_db())
+    if not r:
+        return jsonify({"release": None})
+    return jsonify({"release": {"versionCode": r["version_code"], "versionName": r["version_name"], "notes": r["notes"],
+                                "force": bool(r["force_update"]), "size": r["size"], "createdAt": r["created_at"]}})
+
+
+@app.post("/api/admin/app-release")
+@auth_required("admin")
+def admin_app_release_set():
+    """Rend la dernière version obligatoire (ou non) : l'application Android bloque l'usage tant qu'on n'a pas mis à jour."""
+    db = get_db()
+    r = latest_release(db)
+    if not r:
+        return err("Aucune version publiée.", 404)
+    db.execute("UPDATE app_releases SET force_update=? WHERE id=?", (1 if body().get("force") else 0, r["id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/push/fcm")
+@auth_required()
+def push_fcm():
+    """L'application Android enregistre le jeton Firebase de ce téléphone pour le compte connecté."""
+    tok = body().get("token")
+    if not (isinstance(tok, str) and 20 <= len(tok) <= 4096):
+        return err("Jeton invalide.")
+    db = get_db()
+    db.execute("DELETE FROM fcm_tokens WHERE token=?", (tok,))   # le téléphone change de compte : il suit le dernier connecté
+    db.execute("INSERT INTO fcm_tokens(user_id,token,created_at) VALUES(?,?,?)", (g.user["id"], tok, ts()))
+    old = db.execute("SELECT id FROM fcm_tokens WHERE user_id=? ORDER BY id DESC", (g.user["id"],)).fetchall()
+    for r in old[5:]:                                             # 5 téléphones au plus par personne
+        db.execute("DELETE FROM fcm_tokens WHERE id=?", (r["id"],))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/push/fcm/remove")
+@auth_required()
+def push_fcm_remove():
+    tok = body().get("token")
+    db = get_db()
+    if isinstance(tok, str):
+        db.execute("DELETE FROM fcm_tokens WHERE token=? AND user_id=?", (tok, g.user["id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
 def notify_drivers_of_request(db, rid, lat, lng, wanted, pickup, trip_km=None):
     """Nouvelle demande : on prévient les chauffeurs disponibles à moins de 15 km de leur dernière position connue."""
     fresh = ts(now() - timedelta(hours=PUSH_DRIVER_MAX_AGE_H))
@@ -1393,18 +1640,31 @@ PUSH_REMINDER_DELAYS = (1,) * 40     # tant que la demande est ouverte : le tél
 
 
 def _remind_drivers(rid, driver_ids):
-    """Une notification ne sonne qu'un instant : on la renouvelle tant que personne n'a pris la demande."""
+    """Une notification web ne sonne qu'un instant : on la renouvelle tant que personne n'a pris la demande.
+    (Les téléphones avec l'application Android sonnent d'eux-mêmes 40 s : on leur envoie seulement l'arrêt.)"""
+    android = set()
+    db = DB()
+    try:
+        android = set(fcm_tokens_by_user(db, driver_ids))
+    except Exception:
+        app.logger.exception("jetons FCM")
+    finally:
+        db.close()
     for n, delay in enumerate(PUSH_REMINDER_DELAYS, 1):
         time.sleep(delay)
         db = DB()
         try:
             r = db.execute("SELECT status FROM ride_requests WHERE id=?", (rid,)).fetchone()
             if not r or r["status"] != "open":
+                if android:
+                    fcm_stop(db, list(android), rid)
                 return
             marks = ",".join("?" * len(driver_ids))
             still = [x["user_id"] for x in db.execute(
-                f"SELECT user_id FROM drivers WHERE availability IN ('available','busy') AND user_id IN ({marks})", driver_ids).fetchall()]
-            notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}-{n}", urgent=True)   # un tag différent à chaque rappel : sinon le téléphone remplace la notification en silence
+                f"SELECT user_id FROM drivers WHERE availability IN ('available','busy') AND user_id IN ({marks})", driver_ids).fetchall()
+                if x["user_id"] not in android]
+            if still:
+                notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}-{n}", urgent=True)   # un tag différent à chaque rappel : sinon le téléphone remplace la notification en silence
         except Exception:
             app.logger.exception("rappel push")
             return
@@ -2181,7 +2441,7 @@ def admin_delete_validator(uid):
     if not db.execute("SELECT 1 FROM users WHERE id=? AND role='admin' AND staff_scope='validator'", (uid,)).fetchone():
         return err("Validateur introuvable.", 404)
     db.execute("DELETE FROM message_files WHERE message_id IN (SELECT id FROM messages WHERE user_id=?)", (uid,))
-    for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages"):
+    for t in ("tokens", "push_subscriptions", "fcm_tokens", "password_resets", "announcement_reads", "messages"):
         db.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
     db.execute("DELETE FROM users WHERE id=?", (uid,))
     db.commit()
@@ -2399,6 +2659,43 @@ def admin_restore_user(cid):
     return jsonify({"ok": True})
 
 
+def erase_user(db, uid):
+    """Efface définitivement un compte client ou chauffeur et toutes ses données (sans commit)."""
+    # Signalements faits par ou contre cette personne, puis ceux liés à ses demandes de course
+    db.execute("DELETE FROM reports WHERE reporter_id=? OR target_user_id=?", (uid, uid))
+    db.execute("UPDATE reports SET request_id=NULL WHERE request_id IN (SELECT id FROM ride_requests WHERE client_id=?)", (uid,))
+    db.execute("DELETE FROM ride_requests WHERE client_id=?", (uid,))
+    # Courses où elle était chauffeur : l'historique des clients reste, sans le chauffeur
+    db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE driver_id=? AND status='accepted'", (ts(), uid))
+    db.execute("UPDATE ride_requests SET driver_id=NULL WHERE driver_id=?", (uid,))
+    db.execute("DELETE FROM message_files WHERE message_id IN (SELECT id FROM messages WHERE user_id=?)", (uid,))
+    for t in ("tokens", "push_subscriptions", "fcm_tokens", "login_history", "password_resets", "announcement_reads", "messages", "drivers"):
+        db.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
+
+
+@app.post("/api/me/delete")
+@auth_required()
+def delete_my_account():
+    """Suppression de son propre compte (exigée par le Play Store) : mot de passe + mot SUPPRIMER."""
+    if g.user["role"] == "admin":
+        return err("Le compte administrateur ne peut pas être supprimé ici.", 403)
+    data = body()
+    key = ("del", g.user["id"])
+    if login_locked(key):
+        return err("Trop de tentatives. Réessayez dans quelques minutes.", 429)
+    if not check_password_hash(g.user["password_hash"], str(data.get("password") or "")):
+        login_failed(key)
+        return err("Mot de passe incorrect.", 403)
+    if clean(data.get("confirm"), 20).upper() != "SUPPRIMER":
+        return err("Tapez SUPPRIMER pour confirmer.", 400)
+    db = get_db()
+    erase_user(db, g.user["id"])
+    db.commit()
+    _login_fails.pop(key, None)
+    return jsonify({"ok": True})
+
+
 @app.delete("/api/admin/users/<int:uid>")
 @auth_required("admin")
 def admin_delete_user(uid):
@@ -2417,17 +2714,7 @@ def admin_delete_user(uid):
         "messages": [dict(r) for r in db.execute("SELECT * FROM messages WHERE user_id=?", (uid,)).fetchall()],
         "rides": [dict(r) for r in db.execute("SELECT * FROM ride_requests WHERE client_id=?", (uid,)).fetchall()],
     })
-    # Signalements faits par ou contre cette personne, puis ceux liés à ses demandes de course
-    db.execute("DELETE FROM reports WHERE reporter_id=? OR target_user_id=?", (uid, uid))
-    db.execute("UPDATE reports SET request_id=NULL WHERE request_id IN (SELECT id FROM ride_requests WHERE client_id=?)", (uid,))
-    db.execute("DELETE FROM ride_requests WHERE client_id=?", (uid,))
-    # Courses où elle était chauffeur : l'historique des clients reste, sans le chauffeur
-    db.execute("UPDATE ride_requests SET status='cancelled', closed_at=? WHERE driver_id=? AND status='accepted'", (ts(), uid))
-    db.execute("UPDATE ride_requests SET driver_id=NULL WHERE driver_id=?", (uid,))
-    db.execute("DELETE FROM message_files WHERE message_id IN (SELECT id FROM messages WHERE user_id=?)", (uid,))
-    for t in ("tokens", "push_subscriptions", "password_resets", "announcement_reads", "messages", "drivers"):
-        db.execute(f"DELETE FROM {t} WHERE " + ("user_id=?"), (uid,))
-    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    erase_user(db, uid)
     db.commit()
     return jsonify({"ok": True})
 
@@ -2543,7 +2830,7 @@ def validate_backup(db, data):
 
 def restore_all(db, data):
     """Remplace TOUT le contenu par celui de la sauvegarde, dans une seule transaction (l'appelant valide ou annule)."""
-    for table in ["call_signals", "calls", "tokens", "push_subscriptions", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
+    for table in ["call_signals", "calls", "tokens", "push_subscriptions", "fcm_tokens", "password_resets"] + [t for t, _ in BACKUP_TABLES][::-1]:
         db.execute(f"DELETE FROM {table}")
     for table, _order in BACKUP_TABLES:
         groups = {}
