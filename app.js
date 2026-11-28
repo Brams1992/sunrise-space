@@ -2398,6 +2398,10 @@ async function boot() {
   if (sp) { sp.addEventListener('pointerdown', endSplash, { once: true }); setTimeout(endSplash, 3200); }
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
+    // Les notifications de demande restent affichées jusqu'à l'ouverture de l'application : on les efface à ce moment-là
+    const clearNotifs = () => navigator.serviceWorker.getRegistration().then((r) => r && r.getNotifications().then((l) => l.forEach((n) => n.close()))).catch(() => {});
+    clearNotifs();
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) clearNotifs(); });
     navigator.serviceWorker.addEventListener('message', (e) => { if (e.data && e.data.type === 'push') { if (state.onPush) state.onPush(); checkIncomingCall(); if (e.data.urgent && state.user && state.user.role === 'admin') startAlarm(false, state.user.scope === 'validator' ? '🔔 Chauffeur à valider !' : '🔔 Nouveau chauffeur ou message !'); } });
   }
   try { state.meta = await api('/api/meta'); }

@@ -1394,7 +1394,7 @@ PUSH_REMINDER_DELAYS = (1,) * 40     # tant que la demande est ouverte : le tél
 
 def _remind_drivers(rid, driver_ids):
     """Une notification ne sonne qu'un instant : on la renouvelle tant que personne n'a pris la demande."""
-    for delay in PUSH_REMINDER_DELAYS:
+    for n, delay in enumerate(PUSH_REMINDER_DELAYS, 1):
         time.sleep(delay)
         db = DB()
         try:
@@ -1404,7 +1404,7 @@ def _remind_drivers(rid, driver_ids):
             marks = ",".join("?" * len(driver_ids))
             still = [x["user_id"] for x in db.execute(
                 f"SELECT user_id FROM drivers WHERE availability IN ('available','busy') AND user_id IN ({marks})", driver_ids).fetchall()]
-            notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}", urgent=True)
+            notify_users(db, still, "🙋 Demande toujours en attente", "Touchez pour ouvrir et accepter la course.", tag=f"req-{rid}-{n}", urgent=True)   # un tag différent à chaque rappel : sinon le téléphone remplace la notification en silence
         except Exception:
             app.logger.exception("rappel push")
             return
