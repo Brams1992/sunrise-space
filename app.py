@@ -74,14 +74,20 @@ REPORT_REASONS = {
 
 RESTORE_PATH = "/api/admin/restore"
 RESTORE_MAX_BYTES = 25 * 1024 * 1024   # taille maximale d'un fichier de sauvegarde envoyé pour restauration
+PUBLISH_PATH = "/api/app/publish"
+PUBLISH_MAX_BYTES = 61 * 1024 * 1024   # APK envoyé par GitHub (60 Mo maximum + champs du formulaire)
 
 
 class AppRequest(Request):
-    """Corps limité à 64 Ko partout, sauf pour l'envoi d'une sauvegarde (réservé à l'admin)."""
+    """Corps limité à 64 Ko partout, sauf pour l'envoi d'une sauvegarde (admin) et d'un APK (jeton GitHub)."""
 
     @property
     def max_content_length(self):
-        return RESTORE_MAX_BYTES if self.path == RESTORE_PATH else 64 * 1024
+        if self.path == RESTORE_PATH:
+            return RESTORE_MAX_BYTES
+        if self.path == PUBLISH_PATH:
+            return PUBLISH_MAX_BYTES
+        return 64 * 1024
 
     @max_content_length.setter
     def max_content_length(self, value):
