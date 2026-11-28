@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1090201461701",
+    "project_id": "sunrise-space-56354",
+    "storage_bucket": "sunrise-space-56354.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1090201461701:android:0b40b8c2af3c3fe4aea1ac",
+        "android_client_info": {
+          "package_name": "ci.sunrisespace.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAV4DcKIQo1-hBT7ObkJsbEaV8LCc_JNJA"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Sunrise Space</string>
+    <string name="channel_ring">Demandes de course (sonnerie)</string>
+    <string name="channel_ring_desc">Sonne comme un appel quand une demande de course arrive près de vous.</string>
+    <string name="channel_info">Messages et informations</string>
+    <color name="ic_bg">#0B1D3A</color>
+</resources>
